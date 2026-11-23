@@ -4,3 +4,4 @@ anthropic
 google-genai>=1.0,<3.0
 ddgs>=9.0,<10.0
 pypdf>=5.0,<7.0
+faster-whisper>=1.2,<2.0
