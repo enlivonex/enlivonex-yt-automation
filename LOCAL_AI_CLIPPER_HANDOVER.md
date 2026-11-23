@@ -14,23 +14,22 @@ generator or legacy Drive captioning pipeline.
 
 1. Select a folder of source videos and choose whether to include subfolders.
 2. Select an input video and configure target duration, aspect ratio,
-   resolution, captions, and permitted visual effects.
+   resolution, captions, and optional creative color grading.
 3. Analyze the video locally. Show progress and any unsupported or unreadable
    files with actionable errors.
 4. Review AI-suggested moments with timestamps, transcript excerpts, and
    previews. Allow users to adjust start/end times and choose moments.
 5. Render a draft locally. Support animated subtitles and optional zooms,
-   emojis, and overlays from approved local assets.
+   emojis, overlays from approved local assets, and user-controlled sharpening,
+   contrast, saturation, and grain for visual style.
 6. Preview the finished result, edit its YouTube metadata, and explicitly
    confirm before uploading. Keep upload visibility private by default and
    preserve existing public-upload safeguards.
 
-### Product decision to confirm before implementation
+### Output behavior
 
-Should selected moments produce (a) one output file per moment, (b) one
-compilation made from several moments, or (c) both? The original feature
-request mentioned a single finished clip; confirm the preferred default with
-the product owners before building the export UI.
+The first export compiles selected moments into one output video in the order
+chosen by the user. Separate output files per moment can be considered later.
 
 ## Scope and guardrails
 
@@ -39,6 +38,10 @@ the product owners before building the export UI.
 - Treat source videos as read-only. Never overwrite or delete originals.
 - Ask users to confirm that they have the rights to edit and publish the
   selected videos and any included audio or visual material.
+- Color grading and other visual transformations are creative controls only.
+  They do not change ownership, grant reuse rights, make copyrighted material
+  copyright-free, or guarantee avoidance of platform copyright claims. Do not
+  design or advertise filters as a way to evade copyright detection.
 - Only use user-provided or appropriately licensed GIFs, meme assets, fonts,
   music, and overlays. Keep license/attribution information with bundled
   assets; do not scrape these assets from the web.
@@ -173,7 +176,9 @@ Possible module names are suggestions, not requirements:
 5. **Render and validate:** Reuse the existing FFmpeg wrapper where practical.
    Render selected ranges, captions, optional effects, and audio without
    modifying the source. Validate output duration, dimensions, aspect ratio,
-   and audio/video streams with FFprobe.
+   and audio/video streams with FFprobe. Add any sharpness, contrast,
+   saturation, or grain controls as bounded, optional creative grading with
+   neutral defaults.
 6. **Publish:** Reuse the existing metadata and YouTube upload/account
    components after user review and confirmation.
 
@@ -213,8 +218,8 @@ Keep the first deliverable small:
   existing reviewed-upload flow if it can be connected cleanly.
 
 Defer advanced animated styles, automatic zooms, emoji/GIF asset placement,
-multi-video batch processing, and elaborate timeline editing until this
-end-to-end path is stable.
+color-grading controls, multi-video batch processing, and elaborate timeline
+editing until the end-to-end clip selection and rendering path is stable.
 
 ## Acceptance criteria
 
@@ -224,6 +229,9 @@ end-to-end path is stable.
   space produce visible errors rather than success-shaped results.
 - Every suggested range is within source duration and can be manually edited.
 - A rendered output matches the selected format and passes media validation.
+- Optional image adjustments have validated ranges, neutral defaults, and
+  focused tests; they are documented as creative styling and never as a way
+  to avoid copyright claims.
 - The UI shows progress and supports cancellation without corrupting source
   files or leaving a job marked completed incorrectly.
 - Analysis and rendering do not upload source media to a service.
