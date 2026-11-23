@@ -111,6 +111,19 @@ class LocalClipRenderer:
             "setsar=1",
             f"fps={settings.fps}",
         ]
+        if settings.sharpness:
+            filters.append(
+                "unsharp=luma_msize_x=5:luma_msize_y=5:"
+                f"luma_amount={settings.sharpness:g}:"
+                "chroma_msize_x=5:chroma_msize_y=5:chroma_amount=0"
+            )
+        if settings.contrast != 1.0 or settings.saturation != 1.0:
+            filters.append(
+                f"eq=contrast={settings.contrast:g}:"
+                f"saturation={settings.saturation:g}"
+            )
+        if settings.grain:
+            filters.append(f"noise=alls={settings.grain}:allf=t+u")
         if caption_path:
             filters.append(self._ass_filter(caption_path))
 

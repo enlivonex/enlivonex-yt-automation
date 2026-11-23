@@ -109,9 +109,11 @@ rendered = LocalClipRenderer().render(plan, output_path)
 
 The renderer rechecks the source hash, never writes over the source, uses
 FFmpeg locally, optionally burns transcript captions, joins selected ranges,
-and validates the output dimensions, duration, and audio stream. The UI can
-consume these backend interfaces; the terminal workflow is implemented, while
-the desktop UI integration remains future work.
+and validates the output dimensions, duration, and audio stream. It also
+supports optional visual grading: sharpness `0-1.5`, contrast `0.5-1.5`,
+saturation `0-2`, and grain `0-20`. Defaults are neutral. These controls are
+for appearance only and are not intended to alter copyright status or evade
+claims. The desktop UI integration remains future work.
 
 The terminal workflow is available through `python -m app.repurpose.cli`:
 
@@ -121,6 +123,7 @@ python -m app.repurpose.cli analyze "C:\Videos\source.mp4" `
 
 python -m app.repurpose.cli render "C:\Videos\source.analysis.json" `
   --candidate 1 --candidate 3 `
+  --sharpness 0.5 --contrast 1.1 --saturation 1.1 --grain 4 `
   --output "C:\Videos\source-clips.mp4"
 ```
 
@@ -218,8 +221,8 @@ Keep the first deliverable small:
   existing reviewed-upload flow if it can be connected cleanly.
 
 Defer advanced animated styles, automatic zooms, emoji/GIF asset placement,
-color-grading controls, multi-video batch processing, and elaborate timeline
-editing until the end-to-end clip selection and rendering path is stable.
+multi-video batch processing, and elaborate timeline editing until the
+end-to-end clip selection and rendering path is stable.
 
 ## Acceptance criteria
 

@@ -123,6 +123,14 @@ def test_render_command_passes_selected_moments_as_one_compilation(
             "720",
             "--height",
             "1280",
+            "--sharpness",
+            "0.75",
+            "--contrast",
+            "1.1",
+            "--saturation",
+            "1.2",
+            "--grain",
+            "5",
             "--no-captions",
         ]
     )
@@ -135,6 +143,10 @@ def test_render_command_passes_selected_moments_as_one_compilation(
     assert plan.settings.width == 720
     assert plan.settings.height == 1280
     assert plan.settings.burn_captions is False
+    assert plan.settings.sharpness == 0.75
+    assert plan.settings.contrast == 1.1
+    assert plan.settings.saturation == 1.2
+    assert plan.settings.grain == 5
     assert captured["output_path"] == output
     assert "Rendered video:" in capsys.readouterr().out
 

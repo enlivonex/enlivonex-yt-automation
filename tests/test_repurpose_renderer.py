@@ -84,6 +84,15 @@ def test_edit_plan_rejects_empty_or_out_of_bounds_ranges(tmp_path):
         {"fps": 0},
         {"fit_mode": "stretch"},
         {"quality_preset": "unknown"},
+        {"sharpness": -0.1},
+        {"sharpness": 1.6},
+        {"contrast": 1.6},
+        {"contrast": float("nan")},
+        {"saturation": -0.1},
+        {"saturation": 2.1},
+        {"grain": -1},
+        {"grain": 21},
+        {"grain": 1.5},
     ],
 )
 def test_output_settings_reject_invalid_values(settings):
@@ -122,7 +131,11 @@ def test_renderer_compiles_ranges_captions_and_preserves_source(tmp_path):
     ]
     assert first_command[first_command.index("-ss") + 1] == "0.000000"
     assert second_command[second_command.index("-ss") + 1] == "40.000000"
-    assert "ass='" in first_command[first_command.index("-vf") + 1]
+    filters = first_command[first_command.index("-vf") + 1]
+    assert "ass='" in filters
+    assert "unsharp=" not in filters
+    assert "eq=" not in filters
+    assert "noise=" not in filters
     assert concat_command[concat_command.index("-c") + 1] == "copy"
     assert sorted(path.name for path in output.parent.iterdir()) == [
         "compilation.mp4"
@@ -169,3 +182,32 @@ def test_renderer_does_not_publish_invalid_output(
 
     assert not output.exists()
     assert list(tmp_path.iterdir()) == [source.path]
+
+
+def test_renderer_applies_requested_creative_color_filters(tmp_path):
+    source = create_source(tmp_path / "source.mp4")
+    ffmpeg = FakeFFmpeg(output_duration=10)
+    plan = ClipEditPlan(
+        source,
+        (ClipRange(0, 10),),
+        settings=ClipOutputSettings(
+            width=1080,
+            height=1920,
+            burn_captions=False,
+            sharpness=0.8,
+            contrast=1.1,
+            saturation=1.2,
+            grain=6,
+        ),
+    )
+
+    LocalClipRenderer(ffmpeg, FakeCatalog(source)).render(
+        plan, tmp_path / "graded.mp4"
+    )
+
+    filter_graph = ffmpeg.commands[0][0][
+        ffmpeg.commands[0][0].index("-vf") + 1
+    ]
+    assert "luma_amount=0.8" in filter_graph
+    assert "eq=contrast=1.1:saturation=1.2" in filter_graph
+    assert "noise=alls=6:allf=t+u" in filter_graph

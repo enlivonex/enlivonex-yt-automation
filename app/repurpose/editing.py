@@ -35,6 +35,10 @@ class ClipOutputSettings:
     quality_preset: str = "medium"
     burn_captions: bool = True
     caption_font_size: int = 48
+    sharpness: float = 0.0
+    contrast: float = 1.0
+    saturation: float = 1.0
+    grain: int = 0
 
     def __post_init__(self) -> None:
         if self.width < 2 or self.height < 2 or self.width % 2 or self.height % 2:
@@ -47,6 +51,28 @@ class ClipOutputSettings:
             raise ValueError("Unsupported FFmpeg quality preset.")
         if self.caption_font_size < 8 or self.caption_font_size > 160:
             raise ValueError("Caption font size must be between 8 and 160.")
+        adjustments = {
+            "sharpness": (self.sharpness, 0.0, 1.5),
+            "contrast": (self.contrast, 0.5, 1.5),
+            "saturation": (self.saturation, 0.0, 2.0),
+        }
+        for name, (value, minimum, maximum) in adjustments.items():
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or not minimum <= value <= maximum
+            ):
+                raise ValueError(
+                    f"{name.capitalize()} must be between {minimum:g} and "
+                    f"{maximum:g}."
+                )
+        if (
+            isinstance(self.grain, bool)
+            or not isinstance(self.grain, int)
+            or not 0 <= self.grain <= 20
+        ):
+            raise ValueError("Grain must be an integer between 0 and 20.")
 
 
 @dataclass(frozen=True)

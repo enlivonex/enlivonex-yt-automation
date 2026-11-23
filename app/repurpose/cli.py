@@ -75,6 +75,30 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--fps", type=int, default=30)
     render.add_argument("--fit-mode", choices=("crop", "pad"), default="crop")
     render.add_argument(
+        "--sharpness",
+        type=float,
+        default=0.0,
+        help="Creative sharpness adjustment from 0 to 1.5 (default: 0).",
+    )
+    render.add_argument(
+        "--contrast",
+        type=float,
+        default=1.0,
+        help="Creative contrast adjustment from 0.5 to 1.5 (default: 1).",
+    )
+    render.add_argument(
+        "--saturation",
+        type=float,
+        default=1.0,
+        help="Creative saturation adjustment from 0 to 2 (default: 1).",
+    )
+    render.add_argument(
+        "--grain",
+        type=int,
+        default=0,
+        help="Creative grain strength from 0 to 20 (default: 0).",
+    )
+    render.add_argument(
         "--quality-preset",
         choices=("ultrafast", "fast", "medium", "slow"),
         default="medium",
@@ -164,6 +188,10 @@ def _render(args: argparse.Namespace) -> None:
             quality_preset=args.quality_preset,
             burn_captions=not args.no_captions,
             caption_font_size=args.caption_font_size,
+            sharpness=args.sharpness,
+            contrast=args.contrast,
+            saturation=args.saturation,
+            grain=args.grain,
         ),
     )
     result = LocalClipRenderer().render(plan, args.output.expanduser())
