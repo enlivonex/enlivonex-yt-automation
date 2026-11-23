@@ -89,9 +89,54 @@ analyzer.analyze(
 `ClipAnalysis` contains a `VideoSource`, ordered timestamped `transcript`
 segments, and ranked `candidates` with start/end times, transcript, score, and
 rationale. Candidate windows are sampled across the source and capped at 32 per
-local-model ranking request to bound prompt size. Analysis is implemented
-first; edit-plan persistence and rendering are follow-on backend work, so the
-UI should not assume those APIs exist yet.
+local-model ranking request to bound prompt size.
+
+The rendering interface compiles an ordered set of user-selected source ranges
+into one output file:
+
+```python
+plan = ClipEditPlan(
+    source=analysis.source,
+    ranges=(ClipRange(start_seconds=10, end_seconds=25),),
+    transcript=analysis.transcript,
+    settings=ClipOutputSettings(width=1080, height=1920),
+)
+rendered = LocalClipRenderer().render(plan, output_path)
+```
+
+The renderer rechecks the source hash, never writes over the source, uses
+FFmpeg locally, optionally burns transcript captions, joins selected ranges,
+and validates the output dimensions, duration, and audio stream. The UI can
+consume these backend interfaces; the terminal workflow is implemented, while
+the desktop UI integration remains future work.
+
+The terminal workflow is available through `python -m app.repurpose.cli`:
+
+```powershell
+python -m app.repurpose.cli analyze "C:\Videos\source.mp4" `
+  --whisper-model "C:\models\faster-whisper-small"
+
+python -m app.repurpose.cli render "C:\Videos\source.analysis.json" `
+  --candidate 1 --candidate 3 `
+  --output "C:\Videos\source-clips.mp4"
+```
+
+Analysis uses Faster-Whisper and the configured local Ollama model; rendering
+uses local FFmpeg. The output command joins the selected suggestions into one
+MP4. Optional AI dependencies are installed with
+`python -m pip install -r requirements-ai.txt`. Users must obtain the local
+Whisper and Ollama model files before analysis; model acquisition is not done
+implicitly while processing a video.
+
+## Cost and offline expectations
+
+The feature is designed to avoid per-video subscriptions and paid AI API calls:
+transcription, moment ranking, and rendering run on the user's PC. Initial
+installation/model downloads may require internet and disk space; ongoing
+processing uses local compute, power, and storage. CPU-only PCs may be slower.
+Third-party model, package, and FFmpeg licenses must be reviewed and
+redistributed in accordance with their terms. YouTube upload remains subject
+to Google's platform availability and quotas.
 
 ### New workflow boundary
 
