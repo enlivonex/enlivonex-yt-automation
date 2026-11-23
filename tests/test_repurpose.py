@@ -3,6 +3,8 @@
 import hashlib
 import json
 from pathlib import Path
+from concurrent.futures import CancelledError
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -68,6 +70,19 @@ def test_catalog_requires_existing_folder_and_rejects_unsupported_file(tmp_path)
     unsupported.write_text("not a video", encoding="utf-8")
     with pytest.raises(ValueError, match="Unsupported video format"):
         catalog.inspect(unsupported)
+
+
+def test_catalog_stops_inspecting_when_cancellation_is_requested(tmp_path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    ffmpeg = FakeFFmpeg()
+    cancel_event = Event()
+    cancel_event.set()
+
+    with pytest.raises(CancelledError):
+        LocalVideoCatalog(ffmpeg).inspect(source, cancel_event=cancel_event)
+
+    assert ffmpeg.probed == []
 
 
 def test_ranker_returns_no_suggestions_when_video_is_shorter_than_minimum():
@@ -274,3 +289,35 @@ def test_faster_whisper_loads_model_in_local_files_only_mode(
 
     assert constructor_args[0][1]["local_files_only"] is True
     assert result == (TranscriptSegment(0.1, 2.2, "Spoken words."),)
+
+
+def test_faster_whisper_stops_between_transcript_segments(
+    tmp_path, monkeypatch
+):
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    cancel_event = Event()
+
+    def segments():
+        yield SimpleNamespace(start=0, end=1, text="First segment.")
+        cancel_event.set()
+        yield SimpleNamespace(start=1, end=2, text="Second segment.")
+
+    class FakeWhisperModel:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def transcribe(self, _path, **_kwargs):
+            return iter(segments()), SimpleNamespace(language="en")
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=FakeWhisperModel),
+    )
+    transcriber = FasterWhisperTranscriber(model_dir)
+
+    with pytest.raises(CancelledError):
+        transcriber.transcribe(source, cancel_event=cancel_event)

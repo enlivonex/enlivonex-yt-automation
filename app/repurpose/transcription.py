@@ -1,8 +1,10 @@
 """Local speech-to-text adapter and transcription interface."""
 
 from pathlib import Path
+from threading import Event
 from typing import Protocol
 
+from .cancellation import raise_if_cancelled
 from .models import TranscriptSegment
 
 
@@ -10,7 +12,10 @@ class Transcriber(Protocol):
     """Port implemented by local timestamped speech-to-text providers."""
 
     def transcribe(
-        self, video_path: Path, language: str | None = None
+        self,
+        video_path: Path,
+        language: str | None = None,
+        cancel_event: Event | None = None,
     ) -> tuple[TranscriptSegment, ...]:
         """Return ordered speech segments with source-video timestamps."""
 
@@ -43,13 +48,18 @@ class FasterWhisperTranscriber:
         self._model = None
 
     def transcribe(
-        self, video_path: Path, language: str | None = None
+        self,
+        video_path: Path,
+        language: str | None = None,
+        cancel_event: Event | None = None,
     ) -> tuple[TranscriptSegment, ...]:
         """Transcribe with a local model directory, refusing implicit downloads."""
+        raise_if_cancelled(cancel_event)
         path = Path(video_path)
         if not path.is_file():
             raise FileNotFoundError(f"Video file not found: {path}")
         model = self._load_model()
+        raise_if_cancelled(cancel_event)
         try:
             segments, _ = model.transcribe(
                 str(path),
@@ -57,18 +67,22 @@ class FasterWhisperTranscriber:
                 beam_size=self.beam_size,
                 vad_filter=True,
             )
-            transcript = tuple(
-                TranscriptSegment(
-                    start_seconds=float(segment.start),
-                    end_seconds=float(segment.end),
-                    text=str(segment.text).strip(),
-                )
-                for segment in segments
-                if str(segment.text).strip()
-            )
+            transcript = []
+            for segment in segments:
+                raise_if_cancelled(cancel_event)
+                text = str(segment.text).strip()
+                if text:
+                    transcript.append(
+                        TranscriptSegment(
+                            start_seconds=float(segment.start),
+                            end_seconds=float(segment.end),
+                            text=text,
+                        )
+                    )
+            raise_if_cancelled(cancel_event)
         except (OSError, RuntimeError, ValueError) as error:
             raise RuntimeError(f"Local transcription failed: {error}") from error
-        return transcript
+        return tuple(transcript)
 
     def _load_model(self):
         if self._model is not None:

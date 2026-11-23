@@ -6,8 +6,13 @@ Provides a clean interface for video processing operations.
 
 import subprocess
 import json
+import math
+import queue
+import threading
+import time
+from concurrent.futures import CancelledError
 from pathlib import Path
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Callable
 from dataclasses import dataclass
 
 from .process import hidden_process_creation_flags
@@ -245,6 +250,116 @@ class FFmpegWrapper:
             raise RuntimeError(f"FFmpeg command timed out after {timeout}s")
         except Exception as e:
             raise RuntimeError(f"FFmpeg execution failed: {e}")
+
+    def execute_cancellable(
+        self,
+        args: List[str],
+        *,
+        expected_duration_seconds: float,
+        cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[float], None] | None = None,
+        timeout: int = 300,
+    ) -> Tuple[int, str, str]:
+        """Run an FFmpeg command with cooperative cancellation and progress."""
+        if not self.is_available():
+            raise RuntimeError("FFmpeg not available")
+        if (
+            not math.isfinite(expected_duration_seconds)
+            or expected_duration_seconds <= 0
+        ):
+            raise ValueError("Expected FFmpeg duration must be positive.")
+        if cancel_event is not None and cancel_event.is_set():
+            raise CancelledError("Cancellation requested by the user.")
+
+        command = [self.ffmpeg_path] + args
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                creationflags=hidden_process_creation_flags(),
+            )
+        except OSError as error:
+            raise RuntimeError(f"FFmpeg execution failed: {error}") from error
+
+        output_queue = queue.Queue()
+        output_lines = []
+
+        def read_output() -> None:
+            if process.stdout is None:
+                return
+            try:
+                for line in process.stdout:
+                    output_queue.put(line.rstrip())
+            finally:
+                process.stdout.close()
+
+        reader = threading.Thread(target=read_output, daemon=True)
+        reader.start()
+        deadline = time.monotonic() + timeout
+        try:
+            while (
+                process.poll() is None
+                or reader.is_alive()
+                or not output_queue.empty()
+            ):
+                if cancel_event is not None and cancel_event.is_set():
+                    self._terminate_process(process)
+                    raise CancelledError("Cancellation requested by the user.")
+                if time.monotonic() >= deadline:
+                    self._terminate_process(process)
+                    raise RuntimeError(f"FFmpeg command timed out after {timeout}s")
+                try:
+                    line = output_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                output_lines.append(line)
+                if progress_callback is not None:
+                    out_time = self._progress_time_seconds(line)
+                    if out_time is not None:
+                        progress_callback(
+                            min(1.0, out_time / expected_duration_seconds)
+                        )
+
+            if cancel_event is not None and cancel_event.is_set():
+                raise CancelledError("Cancellation requested by the user.")
+            return_code = process.wait()
+            if progress_callback is not None and return_code == 0:
+                progress_callback(1.0)
+            return return_code, "", "\n".join(output_lines)
+        except BaseException:
+            self._terminate_process(process)
+            raise
+        finally:
+            reader.join(timeout=5)
+
+    @staticmethod
+    def _progress_time_seconds(line: str) -> float | None:
+        key, separator, value = line.partition("=")
+        if not separator or key not in {"out_time_us", "out_time_ms"}:
+            return None
+        try:
+            return max(0.0, int(value) / 1_000_000)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            process.terminate()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
 
     def convert_to_shorts(
         self,

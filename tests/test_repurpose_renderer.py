@@ -2,6 +2,8 @@
 
 import hashlib
 from pathlib import Path
+from concurrent.futures import CancelledError
+from threading import Event
 
 import pytest
 
@@ -15,7 +17,7 @@ class FakeCatalog:
     def __init__(self, source):
         self.source = source
 
-    def inspect(self, path):
+    def inspect(self, path, cancel_event=None):
         assert Path(path) == self.source.path
         return self.source
 
@@ -37,6 +39,25 @@ class FakeFFmpeg:
     def execute(self, args, timeout):
         self.commands.append((args, timeout))
         Path(args[-1]).write_bytes(b"rendered")
+        return 0, "", ""
+
+    def execute_cancellable(
+        self,
+        args,
+        *,
+        timeout,
+        expected_duration_seconds,
+        cancel_event=None,
+        progress_callback=None,
+    ):
+        self.commands.append((args, timeout))
+        Path(args[-1]).write_bytes(b"rendered")
+        if progress_callback is not None:
+            progress_callback(0.5)
+        if cancel_event is not None and cancel_event.is_set():
+            raise CancelledError("Cancellation requested by the user.")
+        if progress_callback is not None:
+            progress_callback(1.0)
         return 0, "", ""
 
     def probe(self, path):
@@ -211,3 +232,55 @@ def test_renderer_applies_requested_creative_color_filters(tmp_path):
     assert "luma_amount=0.8" in filter_graph
     assert "eq=contrast=1.1:saturation=1.2" in filter_graph
     assert "noise=alls=6:allf=t+u" in filter_graph
+
+
+def test_renderer_reports_progress_and_stages(tmp_path):
+    source = create_source(tmp_path / "source.mp4")
+    ffmpeg = FakeFFmpeg(output_duration=20)
+    plan = ClipEditPlan(
+        source, (ClipRange(0, 10), ClipRange(40, 50))
+    )
+    progress = []
+    stages = []
+
+    result = LocalClipRenderer(ffmpeg, FakeCatalog(source)).render(
+        plan,
+        tmp_path / "progress.mp4",
+        progress_callback=progress.append,
+        stage_callback=stages.append,
+    )
+
+    assert result.path.is_file()
+    assert progress[-1] == 1.0
+    assert progress == sorted(progress)
+    assert stages == [
+        "Rendering moment 1 of 2...",
+        "Rendering moment 2 of 2...",
+        "Joining rendered moments...",
+        "Validating rendered draft...",
+        "Draft ready.",
+    ]
+
+
+def test_renderer_cancellation_cleans_temporary_files(tmp_path):
+    source_path = tmp_path / "source.mp4"
+    source = create_source(source_path)
+    original_bytes = source_path.read_bytes()
+    output = tmp_path / "cancelled.mp4"
+    cancel_event = Event()
+    renderer = LocalClipRenderer(FakeFFmpeg(), FakeCatalog(source))
+
+    def cancel_after_progress(_fraction):
+        cancel_event.set()
+
+    with pytest.raises(CancelledError):
+        renderer.render(
+            ClipEditPlan(source, (ClipRange(0, 10),)),
+            output,
+            cancel_event=cancel_event,
+            progress_callback=cancel_after_progress,
+        )
+
+    assert source_path.read_bytes() == original_bytes
+    assert not output.exists()
+    assert list(tmp_path.iterdir()) == [source_path]

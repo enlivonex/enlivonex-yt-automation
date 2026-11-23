@@ -4,9 +4,12 @@ import math
 import os
 from pathlib import Path
 import tempfile
+from threading import Event
+from typing import Callable
 
 from ..captions.timed import CaptionSegment, CaptionStyle, TimedCaptions
 from ..utils.ffmpeg import FFmpegWrapper, VideoInfo
+from .cancellation import raise_if_cancelled
 from .editing import ClipEditPlan, ClipRange, RenderedClip
 from .source import LocalVideoCatalog
 
@@ -25,11 +28,26 @@ class LocalClipRenderer:
         self.ffmpeg = ffmpeg or FFmpegWrapper()
         self.catalog = catalog or LocalVideoCatalog(self.ffmpeg)
 
-    def render(self, plan: ClipEditPlan, output_path: Path) -> RenderedClip:
+    def render(
+        self,
+        plan: ClipEditPlan,
+        output_path: Path,
+        *,
+        cancel_event: Event | None = None,
+        progress_callback: Callable[[float], None] | None = None,
+        stage_callback: Callable[[str], None] | None = None,
+    ) -> RenderedClip:
         """Render a compilation without modifying or replacing source media."""
-        source = self.catalog.inspect(plan.source.path)
+        raise_if_cancelled(cancel_event)
+        if cancel_event is None:
+            source = self.catalog.inspect(plan.source.path)
+        else:
+            source = self.catalog.inspect(
+                plan.source.path, cancel_event=cancel_event
+            )
         if source.sha256 != plan.source.sha256:
             raise RuntimeError("Source video changed after its analysis.")
+        raise_if_cancelled(cancel_event)
 
         destination = Path(output_path).expanduser().resolve()
         if destination == source.path:
@@ -50,7 +68,17 @@ class LocalClipRenderer:
             has_audio = self.ffmpeg.has_audio_stream(source.path)
             segment_paths = []
             offset_seconds = 0.0
+            total_duration = sum(
+                clip_range.end_seconds - clip_range.start_seconds
+                for clip_range in plan.ranges
+            )
             for index, clip_range in enumerate(plan.ranges):
+                raise_if_cancelled(cancel_event)
+                duration = clip_range.end_seconds - clip_range.start_seconds
+                if stage_callback is not None:
+                    stage_callback(
+                        f"Rendering moment {index + 1} of {len(plan.ranges)}..."
+                    )
                 segment_path = working_directory / f"segment_{index:04d}.mp4"
                 caption_path = None
                 if plan.settings.burn_captions:
@@ -58,6 +86,21 @@ class LocalClipRenderer:
                     self._write_segment_captions(
                         plan, clip_range, caption_path
                     )
+                segment_progress = None
+                if progress_callback is not None:
+                    prior_duration = offset_seconds
+
+                    def segment_progress(
+                        fraction: float,
+                        prior: float = prior_duration,
+                        segment_duration: float = duration,
+                    ) -> None:
+                        progress_callback(
+                            0.9
+                            * (prior + segment_duration * fraction)
+                            / total_duration
+                        )
+
                 self._render_segment(
                     source.path,
                     clip_range,
@@ -66,22 +109,48 @@ class LocalClipRenderer:
                     has_audio,
                     plan,
                     index,
+                    cancel_event,
+                    segment_progress,
                 )
                 segment_paths.append(segment_path)
-                offset_seconds += clip_range.end_seconds - clip_range.start_seconds
+                offset_seconds += duration
 
+            raise_if_cancelled(cancel_event)
+            if stage_callback is not None:
+                stage_callback("Joining rendered moments...")
             concat_list = working_directory / "segments.ffconcat"
             self._write_concat_list(concat_list, segment_paths)
-            self._concatenate(concat_list, temporary_output)
+            concat_progress = None
+            if progress_callback is not None:
+                concat_progress = lambda fraction: progress_callback(
+                    0.9 + 0.09 * fraction
+                )
+            self._concatenate(
+                concat_list,
+                temporary_output,
+                total_duration,
+                cancel_event,
+                concat_progress,
+            )
+            raise_if_cancelled(cancel_event)
+            if stage_callback is not None:
+                stage_callback("Validating rendered draft...")
+            if progress_callback is not None:
+                progress_callback(0.99)
             rendered = self._validate_output(
                 temporary_output,
                 plan,
                 offset_seconds,
                 has_audio,
             )
+            raise_if_cancelled(cancel_event)
             if destination.exists():
                 raise FileExistsError(f"Output video already exists: {destination}")
             os.replace(temporary_output, destination)
+            if progress_callback is not None:
+                progress_callback(1.0)
+            if stage_callback is not None:
+                stage_callback("Draft ready.")
             return RenderedClip(
                 path=destination,
                 duration_seconds=rendered.duration,
@@ -104,6 +173,8 @@ class LocalClipRenderer:
         has_audio: bool,
         plan: ClipEditPlan,
         index: int,
+        cancel_event: Event | None,
+        progress_callback: Callable[[float], None] | None,
     ) -> None:
         settings = plan.settings
         filters = [
@@ -160,11 +231,21 @@ class LocalClipRenderer:
             )
         else:
             args.append("-an")
-        args.extend(["-movflags", "+faststart", str(segment_path)])
-
-        return_code, _, stderr = self.ffmpeg.execute(
-            args, timeout=RENDER_TIMEOUT_SECONDS
-        )
+        args.extend(["-movflags", "+faststart"])
+        if cancel_event is not None or progress_callback is not None:
+            args.extend(["-progress", "pipe:1", "-nostats", str(segment_path)])
+            return_code, _, stderr = self.ffmpeg.execute_cancellable(
+                args,
+                timeout=RENDER_TIMEOUT_SECONDS,
+                expected_duration_seconds=duration,
+                cancel_event=cancel_event,
+                progress_callback=progress_callback,
+            )
+        else:
+            args.append(str(segment_path))
+            return_code, _, stderr = self.ffmpeg.execute(
+                args, timeout=RENDER_TIMEOUT_SECONDS
+            )
         if return_code != 0:
             detail = stderr.strip()[-1200:] or "FFmpeg returned a non-zero exit code."
             raise RuntimeError(f"Could not render clip {index + 1}: {detail}")
@@ -231,27 +312,44 @@ class LocalClipRenderer:
             lines.append(f"file '{ffconcat_path}'")
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    def _concatenate(self, concat_list: Path, output_path: Path) -> None:
-        return_code, _, stderr = self.ffmpeg.execute(
-            [
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(concat_list),
-                "-c",
-                "copy",
-                "-movflags",
-                "+faststart",
-                str(output_path),
-            ],
-            timeout=RENDER_TIMEOUT_SECONDS,
-        )
+    def _concatenate(
+        self,
+        concat_list: Path,
+        output_path: Path,
+        expected_duration: float,
+        cancel_event: Event | None,
+        progress_callback: Callable[[float], None] | None,
+    ) -> None:
+        args = [
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_list),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+        ]
+        if cancel_event is not None or progress_callback is not None:
+            args.extend(["-progress", "pipe:1", "-nostats", str(output_path)])
+            return_code, _, stderr = self.ffmpeg.execute_cancellable(
+                args,
+                timeout=RENDER_TIMEOUT_SECONDS,
+                expected_duration_seconds=expected_duration,
+                cancel_event=cancel_event,
+                progress_callback=progress_callback,
+            )
+        else:
+            args.append(str(output_path))
+            return_code, _, stderr = self.ffmpeg.execute(
+                args, timeout=RENDER_TIMEOUT_SECONDS
+            )
         if return_code != 0:
             detail = stderr.strip()[-1200:] or "FFmpeg returned a non-zero exit code."
             raise RuntimeError(f"Could not join rendered clips: {detail}")

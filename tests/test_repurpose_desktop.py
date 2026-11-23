@@ -2,7 +2,9 @@
 
 import hashlib
 import os
+from concurrent.futures import CancelledError
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -135,6 +137,7 @@ def test_desktop_analysis_uses_loopback_ollama_and_reports_stages(
             8,
         ),
         callbacks.append,
+        Event(),
     )
 
     assert result is analysis
@@ -146,3 +149,29 @@ def test_desktop_analysis_uses_loopback_ollama_and_reports_stages(
         }
     ]
     assert callbacks == ["Transcribing locally..."]
+
+
+def test_cancel_button_stops_worker_and_restores_page(tmp_path, qapplication):
+    page = desktop.LocalClipperPage(env_file=tmp_path / "settings.env")
+
+    def wait_for_cancel(_progress, cancel_event):
+        cancel_event.wait(timeout=2)
+        if cancel_event.is_set():
+            raise CancelledError("Cancellation requested by the user.")
+        return None
+
+    page._start_worker(
+        "analysis", wait_for_cancel, "Starting cancellable analysis..."
+    )
+    assert page.cancel_button.isEnabled()
+
+    page.cancel_button.click()
+    assert page._cancel_requested
+    assert page._worker is not None
+    assert page._worker.wait(3000)
+    qapplication.processEvents()
+
+    assert not page.is_busy
+    assert "cancelled" in page.status.text().lower()
+    assert page.cancel_button.isEnabled() is False
+    page.close()

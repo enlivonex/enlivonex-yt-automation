@@ -3,8 +3,10 @@
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
+from threading import Event
 
 from ..utils.ffmpeg import FFmpegWrapper
+from .cancellation import raise_if_cancelled
 from .models import VideoSource
 
 SUPPORTED_VIDEO_EXTENSIONS = frozenset(
@@ -63,8 +65,11 @@ class LocalVideoCatalog:
                 failures.append(VideoScanFailure(path, str(error)))
         return VideoScanResult(tuple(sources), tuple(failures))
 
-    def inspect(self, path: Path) -> VideoSource:
+    def inspect(
+        self, path: Path, cancel_event: Event | None = None
+    ) -> VideoSource:
         """Probe one supported video and compute its content hash."""
+        raise_if_cancelled(cancel_event)
         source_path = Path(path).expanduser()
         if not source_path.is_file():
             raise FileNotFoundError(f"Video file not found: {source_path}")
@@ -81,10 +86,13 @@ class LocalVideoCatalog:
             raise ValueError(f"Video file is empty: {source_path.name}")
 
         info = self.ffmpeg.probe(source_path)
+        raise_if_cancelled(cancel_event)
         digest = hashlib.sha256()
         with source_path.open("rb") as source_file:
             while chunk := source_file.read(HASH_CHUNK_BYTES):
+                raise_if_cancelled(cancel_event)
                 digest.update(chunk)
+        raise_if_cancelled(cancel_event)
 
         return VideoSource(
             path=source_path,

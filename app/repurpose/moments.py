@@ -2,9 +2,11 @@
 
 import json
 import math
+from threading import Event
 from typing import Any, Protocol
 
 from ..ai.ollama import JSONGenerator
+from .cancellation import raise_if_cancelled
 from .models import MomentCandidate, TranscriptSegment
 
 MAX_RANKING_WINDOWS = 32
@@ -20,8 +22,10 @@ class MomentRanker(Protocol):
         min_duration: float,
         max_duration: float,
         max_candidates: int = 8,
+        cancel_event: Event | None = None,
     ) -> tuple[MomentCandidate, ...]:
         """Return ranked, duration-bounded candidate ranges."""
+        raise_if_cancelled(cancel_event)
 
 
 class OllamaMomentRanker:
@@ -37,6 +41,7 @@ class OllamaMomentRanker:
         min_duration: float,
         max_duration: float,
         max_candidates: int = 8,
+        cancel_event: Event | None = None,
     ) -> tuple[MomentCandidate, ...]:
         _validate_options(source_duration, min_duration, max_duration, max_candidates)
         windows = _build_windows(
@@ -46,6 +51,7 @@ class OllamaMomentRanker:
         if not windows:
             return ()
 
+        raise_if_cancelled(cancel_event)
         response = self.client.generate_json(
             "Rank candidate short-video moments using only the supplied transcript. "
             "Prefer a self-contained thought with an engaging hook, clear context, "
@@ -68,6 +74,7 @@ class OllamaMomentRanker:
                 ensure_ascii=False,
             ),
         )
+        raise_if_cancelled(cancel_event)
         ranked = _parse_ranked_candidates(
             response, windows, source_duration, min_duration, max_duration
         )

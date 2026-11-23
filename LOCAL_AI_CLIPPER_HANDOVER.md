@@ -122,8 +122,11 @@ ranked moments for selection and timestamp adjustment, and renders a local
 draft. The model folder is saved as `FASTER_WHISPER_MODEL_PATH` in `.env`.
 Ranking always targets the loopback Ollama service (`127.0.0.1`); it does not
 reuse a remote story-provider endpoint. Users must confirm editing permission
-before analysis or rendering. Task cancellation and determinate FFmpeg render
-progress remain follow-up UX work.
+before analysis or rendering. Render progress is derived from FFmpeg output;
+the Cancel task button terminates an active FFmpeg process and removes its
+temporary files. Analysis cancellation is cooperative between inspection,
+transcription segments, and model operations. An in-flight Ollama request must
+return before its cancellation request can be applied.
 
 The terminal workflow is available through `python -m app.repurpose.cli`:
 
@@ -246,8 +249,9 @@ end-to-end clip selection and rendering path is stable.
   focused tests; they are documented as creative styling and never as a way
   to avoid copyright claims.
 - The UI shows analysis stages and keeps long-running work off the UI thread.
-  Cancellation and determinate render progress remain to be implemented;
-  source files are never modified.
+  Render progress is determinate; cancellation terminates FFmpeg and cleans
+  temporary files, while analysis cancellation is applied at safe stage
+  boundaries. Source files are never modified.
 - Analysis and rendering do not upload source media to a service.
 - YouTube upload is optional, reviewed, and requires explicit confirmation.
 
@@ -257,6 +261,8 @@ end-to-end clip selection and rendering path is stable.
   discovery, duration/range validation, moment ranking with a fake local
   model, edit-plan serialization, and output-setting validation.
 - Use small synthetic video/audio fixtures for FFmpeg integration tests.
+- Test FFmpeg progress and cancellation with local subprocesses; cancellation
+  must not leave a published partial output or temporary render files.
 - Mock transcription/LLM and YouTube upload in automated tests; tests must not
   require network access, model downloads, or real YouTube accounts.
 - Run targeted tests for the changed modules, then the full test suite if

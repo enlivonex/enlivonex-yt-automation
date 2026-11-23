@@ -1,8 +1,11 @@
 """Dedicated PySide workflow for reviewing and rendering local video moments."""
 
 from collections.abc import Callable
+from concurrent.futures import CancelledError
+from dataclasses import dataclass
 from pathlib import Path
 import os
+from threading import Event
 
 from dotenv import set_key
 from PySide6.QtCore import Qt, QThread, Signal, QUrl
@@ -41,22 +44,41 @@ LOCAL_OLLAMA_URL = "http://127.0.0.1:11434"
 WHISPER_MODEL_ENV = "FASTER_WHISPER_MODEL_PATH"
 
 
+@dataclass(frozen=True)
+class _RepurposeProgress:
+    message: Callable[[str], None]
+    fraction: Callable[[float], None]
+
+
 class _RepurposeWorker(QThread):
     progress = Signal(str)
+    progress_updated = Signal(int)
     succeeded = Signal(object)
     failed = Signal(str)
+    cancelled = Signal(str)
 
     def __init__(
         self,
-        operation: Callable[[Callable[[str], None]], object],
+        operation: Callable[[_RepurposeProgress, Event], object],
+        cancel_event: Event,
         parent: QWidget | None = None,
     ):
         super().__init__(parent)
         self.operation = operation
+        self.cancel_event = cancel_event
 
     def run(self) -> None:
+        def report_fraction(fraction: float) -> None:
+            if not self.cancel_event.is_set():
+                self.progress_updated.emit(round(100 * fraction))
+
         try:
-            result = self.operation(self.progress.emit)
+            result = self.operation(
+                _RepurposeProgress(self.progress.emit, report_fraction),
+                self.cancel_event,
+            )
+        except CancelledError as error:
+            self.cancelled.emit(str(error))
         except Exception as error:
             self.failed.emit(str(error))
         else:
@@ -75,7 +97,10 @@ class LocalClipperPage(QWidget):
         self.env_file = env_file
         self.analysis: ClipAnalysis | None = None
         self._worker: _RepurposeWorker | None = None
+        self._cancel_event: Event | None = None
         self._busy = False
+        self._cancel_requested = False
+        self._operation_successful = False
         self._build_ui()
 
     @property
@@ -219,8 +244,12 @@ class LocalClipperPage(QWidget):
         self.open_output_button = QPushButton("Open rendered draft")
         self.open_output_button.setEnabled(False)
         self.open_output_button.clicked.connect(self._open_rendered_output)
+        self.cancel_button = QPushButton("Cancel task")
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self._request_cancel)
         action_row.addWidget(self.render_button)
         action_row.addWidget(self.open_output_button)
+        action_row.addWidget(self.cancel_button)
         action_row.addStretch(1)
         render_layout.addLayout(action_row)
         outer.addWidget(render_card)
@@ -363,12 +392,16 @@ class LocalClipperPage(QWidget):
         )
         self._start_worker(
             "analysis",
-            lambda report: self._analyze(options, report),
+            lambda progress, cancel_event: self._analyze(
+                options, progress.message, cancel_event
+            ),
             "Starting local analysis...",
         )
 
     @staticmethod
-    def _analyze(options, report: Callable[[str], None]) -> ClipAnalysis:
+    def _analyze(
+        options, report: Callable[[str], None], cancel_event: Event
+    ) -> ClipAnalysis:
         from app.ai.ollama import OllamaClient
         from app.config.settings import load_settings
 
@@ -398,6 +431,7 @@ class LocalClipperPage(QWidget):
             max_duration=max_duration,
             max_candidates=max_candidates,
             progress_callback=report,
+            cancel_event=cancel_event,
         )
 
     def _populate_candidates(self, analysis: ClipAnalysis) -> None:
@@ -499,8 +533,15 @@ class LocalClipperPage(QWidget):
             return
         self._start_worker(
             "render",
-            lambda report: self._render(plan, destination, report),
+            lambda progress, cancel_event: self._render(
+                plan,
+                destination,
+                progress.message,
+                progress.fraction,
+                cancel_event,
+            ),
             "Rendering selected moments locally...",
+            determinate=True,
         )
 
     @staticmethod
@@ -508,27 +549,42 @@ class LocalClipperPage(QWidget):
         plan: ClipEditPlan,
         destination: Path,
         report: Callable[[str], None],
+        progress: Callable[[float], None],
+        cancel_event: Event,
     ) -> RenderedClip:
-        report(f"Rendering {len(plan.ranges)} selected moment(s) locally...")
-        return LocalClipRenderer().render(plan, destination)
+        return LocalClipRenderer().render(
+            plan,
+            destination,
+            cancel_event=cancel_event,
+            progress_callback=progress,
+            stage_callback=report,
+        )
 
     def _start_worker(
         self,
         operation_name: str,
-        operation: Callable[[Callable[[str], None]], object],
+        operation: Callable[[_RepurposeProgress, Event], object],
         status: str,
+        *,
+        determinate: bool = False,
     ) -> None:
         if self._busy:
             return
         self._busy = True
+        self._cancel_requested = False
+        self._operation_successful = False
+        self._cancel_event = Event()
         self._operation_name = operation_name
-        self.progress.setRange(0, 0)
+        self.progress.setRange(0, 100 if determinate else 0)
+        self.progress.setValue(0)
         self.status.setText(status)
         self._update_actions()
-        worker = _RepurposeWorker(operation, self)
-        worker.progress.connect(self.status.setText)
+        worker = _RepurposeWorker(operation, self._cancel_event, self)
+        worker.progress.connect(self._show_progress_message)
+        worker.progress_updated.connect(self._show_progress_value)
         worker.succeeded.connect(self._operation_succeeded)
         worker.failed.connect(self._operation_failed)
+        worker.cancelled.connect(self._operation_cancelled)
         worker.finished.connect(self._operation_finished)
         worker.finished.connect(worker.deleteLater)
         self._worker = worker
@@ -550,15 +606,45 @@ class LocalClipperPage(QWidget):
                 f"Draft rendered: {result.path} "
                 f"({result.duration_seconds:.1f}s, {result.width}x{result.height})."
             )
+        self._operation_successful = True
         self._update_actions()
 
     def _operation_failed(self, message: str) -> None:
+        self._operation_successful = False
         self.status.setText(f"{self._operation_name.capitalize()} failed: {message}")
+
+    def _operation_cancelled(self, message: str) -> None:
+        self._operation_successful = False
+        self.status.setText(
+            f"{self._operation_name.capitalize()} cancelled: {message} "
+            "Temporary render files were cleaned up."
+        )
+
+    def _show_progress_message(self, message: str) -> None:
+        if not self._cancel_requested:
+            self.status.setText(message)
+
+    def _show_progress_value(self, value: int) -> None:
+        if not self._cancel_requested:
+            self.progress.setValue(value)
+
+    def _request_cancel(self) -> None:
+        if not self._busy or self._cancel_event is None:
+            return
+        self._cancel_requested = True
+        self._cancel_event.set()
+        self.status.setText(
+            "Cancellation requested. The current local model step will finish, "
+            "then temporary render files will be removed."
+        )
+        self._update_actions()
 
     def _operation_finished(self) -> None:
         self._busy = False
         self.progress.setRange(0, 100)
-        self.progress.setValue(0)
+        self.progress.setValue(100 if self._operation_successful else 0)
+        self._cancel_event = None
+        self._cancel_requested = False
         self._worker = None
         self._update_actions()
 
@@ -592,3 +678,6 @@ class LocalClipperPage(QWidget):
         self.analyze_button.setEnabled(not self._busy and has_source)
         self.render_button.setEnabled(not self._busy and has_candidates)
         self.choose_output_button.setEnabled(not self._busy)
+        self.cancel_button.setEnabled(
+            self._busy and not self._cancel_requested
+        )
