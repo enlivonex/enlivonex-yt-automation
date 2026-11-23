@@ -46,6 +46,7 @@ from app.gui_helpers import ACTIVITY_MESSAGES, JOB_PROGRESS, upload_job_id
 from app.metadata.generator import create_metadata_generator
 from app.metadata.models import YouTubeMetadata
 from app.orchestration.runner import LocalJobRunner
+from app.repurpose.desktop import LocalClipperPage
 from app.story.models import Story, StorySegment
 from app.story.provider import GEMINI_REQUEST_TIMEOUT_SECONDS
 from app.youtube.accounts import YouTubeAccountStore
@@ -101,6 +102,7 @@ class PySideDashboard(QMainWindow):
         self._build_create_page()
         self._build_settings_page()
         self._build_youtube_page()
+        self._build_repurpose_page()
         self._load_settings()
         self._refresh_recent_outputs()
         self._update_youtube_status()
@@ -230,6 +232,7 @@ class PySideDashboard(QMainWindow):
             ("01   Create video", 0),
             ("02   AI settings", 1),
             ("03   YouTube studio", 2),
+            ("04   Local AI clipper", 3),
         ):
             button = QPushButton(label)
             button.setObjectName("nav")
@@ -577,6 +580,22 @@ class PySideDashboard(QMainWindow):
         outer.addWidget(accounts_card)
         outer.addWidget(upload_card, 1)
         self._add_page(page)
+
+    def _build_repurpose_page(self):
+        self.repurpose_page = LocalClipperPage(env_file=ENV_FILE)
+        self._add_page(self.repurpose_page)
+
+    def closeEvent(self, event):
+        if self.repurpose_page.is_busy:
+            QMessageBox.information(
+                self,
+                "Local task in progress",
+                "Wait for local analysis or rendering to finish before closing "
+                "the app. Source files remain unchanged.",
+            )
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _load_settings(self):
         settings = load_settings()

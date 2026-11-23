@@ -193,6 +193,7 @@ def test_analyzer_connects_source_transcription_and_ranking(tmp_path):
     path.write_bytes(b"source")
     transcript = (TranscriptSegment(0, 10, "A complete sentence."),)
     calls = []
+    progress = []
 
     class FakeTranscriber:
         def transcribe(self, video_path, language=None):
@@ -210,7 +211,12 @@ def test_analyzer_connects_source_transcription_and_ranking(tmp_path):
         LocalVideoCatalog(FakeFFmpeg()), FakeTranscriber(), FakeRanker()
     )
     result = analyzer.analyze(
-        path, min_duration=10, max_duration=30, max_candidates=3, language="en"
+        path,
+        min_duration=10,
+        max_duration=30,
+        max_candidates=3,
+        language="en",
+        progress_callback=progress.append,
     )
 
     assert result.source.path == path.resolve()
@@ -219,6 +225,11 @@ def test_analyzer_connects_source_transcription_and_ranking(tmp_path):
     assert calls == [
         ("transcribe", path.resolve(), "en"),
         ("rank", transcript, 120, 10, 30, 3),
+    ]
+    assert progress == [
+        "Inspecting source video...",
+        "Transcribing with the local speech model...",
+        "Ranking moments with the local Ollama model...",
     ]
 
 

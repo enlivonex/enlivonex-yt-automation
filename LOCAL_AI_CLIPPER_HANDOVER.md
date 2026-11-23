@@ -113,7 +113,17 @@ and validates the output dimensions, duration, and audio stream. It also
 supports optional visual grading: sharpness `0-1.5`, contrast `0.5-1.5`,
 saturation `0-2`, and grain `0-20`. Defaults are neutral. These controls are
 for appearance only and are not intended to alter copyright status or evade
-claims. The desktop UI integration remains future work.
+claims.
+
+The packaged PySide6 app has a separate **Local AI clipper** page in
+`app/repurpose/desktop.py`. It selects one local source video and an installed
+Faster-Whisper model folder, runs analysis away from the UI thread, displays
+ranked moments for selection and timestamp adjustment, and renders a local
+draft. The model folder is saved as `FASTER_WHISPER_MODEL_PATH` in `.env`.
+Ranking always targets the loopback Ollama service (`127.0.0.1`); it does not
+reuse a remote story-provider endpoint. Users must confirm editing permission
+before analysis or rendering. Task cancellation and determinate FFmpeg render
+progress remain follow-up UX work.
 
 The terminal workflow is available through `python -m app.repurpose.cli`:
 
@@ -146,18 +156,18 @@ to Google's platform availability and quotas.
 
 ### New workflow boundary
 
-Add a dedicated local-video-repurposing service/runner and a separate page or
-mode in the PySide6 desktop interface. Avoid adding the full workflow to the
-UI class or changing the semantics of the existing `JobOrchestrator`, which
-generates topic-led narration over selected background clips.
+Keep local-video repurposing in its feature package and a separate page in the
+PySide6 desktop interface. Avoid adding the full workflow to the main UI class
+or changing the semantics of the existing `JobOrchestrator`, which generates
+topic-led narration over selected background clips.
 
 Possible module names are suggestions, not requirements:
 
 - Continue the existing `app/repurpose/` package for source inspection,
   transcription, moment selection, and edit-plan models.
-- A `RepurposeJobRunner` (or equivalent) to coordinate analysis and rendering.
-- A new PySide6 workflow that calls the runner and reports stage/progress
-  events.
+- `app/repurpose/desktop.py` coordinates the separate UI workflow with
+  background workers and stage updates; it calls the existing analyzer and
+  renderer rather than changing the legacy video-generation runner.
 
 ### Processing stages
 
@@ -235,8 +245,9 @@ end-to-end clip selection and rendering path is stable.
 - Optional image adjustments have validated ranges, neutral defaults, and
   focused tests; they are documented as creative styling and never as a way
   to avoid copyright claims.
-- The UI shows progress and supports cancellation without corrupting source
-  files or leaving a job marked completed incorrectly.
+- The UI shows analysis stages and keeps long-running work off the UI thread.
+  Cancellation and determinate render progress remain to be implemented;
+  source files are never modified.
 - Analysis and rendering do not upload source media to a service.
 - YouTube upload is optional, reviewed, and requires explicit confirmation.
 
