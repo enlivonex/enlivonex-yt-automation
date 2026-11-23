@@ -89,7 +89,7 @@ def test_ranker_returns_no_suggestions_when_video_is_shorter_than_minimum():
     transcript = (TranscriptSegment(0, 5, "A short source."),)
 
     class FakeJSONGenerator:
-        def generate_json(self, _system_prompt, _user_prompt):
+        def generate_json(self, _system_prompt, _user_prompt, **_kwargs):
             raise AssertionError("The model should not be called for an empty window set.")
 
     ranked = OllamaMomentRanker(FakeJSONGenerator()).rank(
@@ -110,7 +110,7 @@ def test_ranker_bounds_local_model_prompt_for_long_transcripts():
     payload_sizes = []
 
     class FakeJSONGenerator:
-        def generate_json(self, _system_prompt, user_prompt):
+        def generate_json(self, _system_prompt, user_prompt, **_kwargs):
             payload = json.loads(user_prompt)
             payload_sizes.append(len(payload["candidates"]))
             return {
@@ -134,7 +134,7 @@ def test_ranker_rejects_transcript_segments_outside_source_duration():
     transcript = (TranscriptSegment(0, 20, "Exceeds source duration."),)
 
     class FakeJSONGenerator:
-        def generate_json(self, _system_prompt, _user_prompt):
+        def generate_json(self, _system_prompt, _user_prompt, **_kwargs):
             raise AssertionError("Invalid transcript must be rejected before inference.")
 
     with pytest.raises(ValueError, match="exceeds source duration"):
@@ -155,8 +155,12 @@ def test_ranker_uses_local_model_scores_for_generated_ranges():
     prompts = []
 
     class FakeJSONGenerator:
-        def generate_json(self, system_prompt, user_prompt):
-            prompts.append((system_prompt, json.loads(user_prompt)))
+        def generate_json(
+            self, system_prompt, user_prompt, *, response_schema=None
+        ):
+            prompts.append(
+                (system_prompt, json.loads(user_prompt), response_schema)
+            )
             return {
                 "candidates": [
                     {"id": 1, "score": 0.9, "rationale": "A complete idea."},
@@ -176,6 +180,11 @@ def test_ranker_uses_local_model_scores_for_generated_ranges():
     assert ranked[0].score == 0.9
     assert ranked[0].start_seconds < ranked[0].end_seconds <= 60
     assert ranked[1].score == 0.5
+    assert prompts[0][2]["properties"]["candidates"]["items"]["required"] == [
+        "id",
+        "score",
+        "rationale",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -194,7 +203,7 @@ def test_ranker_rejects_malformed_local_model_output(response):
     )
 
     class FakeJSONGenerator:
-        def generate_json(self, _system_prompt, _user_prompt):
+        def generate_json(self, _system_prompt, _user_prompt, **_kwargs):
             return response
 
     with pytest.raises(RuntimeError):

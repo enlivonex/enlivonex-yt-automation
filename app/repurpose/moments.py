@@ -10,6 +10,26 @@ from .cancellation import raise_if_cancelled
 from .models import MomentCandidate, TranscriptSegment
 
 MAX_RANKING_WINDOWS = 32
+RANKING_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "candidates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "score": {"type": "number", "minimum": 0, "maximum": 1},
+                    "rationale": {"type": "string"},
+                },
+                "required": ["id", "score", "rationale"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["candidates"],
+    "additionalProperties": False,
+}
 
 
 class MomentRanker(Protocol):
@@ -25,7 +45,7 @@ class MomentRanker(Protocol):
         cancel_event: Event | None = None,
     ) -> tuple[MomentCandidate, ...]:
         """Return ranked, duration-bounded candidate ranges."""
-        raise_if_cancelled(cancel_event)
+        ...
 
 
 class OllamaMomentRanker:
@@ -43,6 +63,7 @@ class OllamaMomentRanker:
         max_candidates: int = 8,
         cancel_event: Event | None = None,
     ) -> tuple[MomentCandidate, ...]:
+        raise_if_cancelled(cancel_event)
         _validate_options(source_duration, min_duration, max_duration, max_candidates)
         windows = _build_windows(
             transcript, source_duration, min_duration, max_duration
@@ -55,9 +76,9 @@ class OllamaMomentRanker:
         response = self.client.generate_json(
             "Rank candidate short-video moments using only the supplied transcript. "
             "Prefer a self-contained thought with an engaging hook, clear context, "
-            "and satisfying ending. Return JSON with a 'candidates' array. Each "
-            "entry must contain integer 'id', numeric 'score' from 0 to 1, and a "
-            "short 'rationale'. Do not change timestamps or invent transcript.",
+            "and satisfying ending. Return only candidate ids, numeric scores from "
+            "0 to 1, and short rationales. Do not change timestamps or invent "
+            "transcript; comply with the supplied response schema.",
             json.dumps(
                 {
                     "max_results": max_candidates,
@@ -73,6 +94,7 @@ class OllamaMomentRanker:
                 },
                 ensure_ascii=False,
             ),
+            response_schema=RANKING_RESPONSE_SCHEMA,
         )
         raise_if_cancelled(cancel_event)
         ranked = _parse_ranked_candidates(

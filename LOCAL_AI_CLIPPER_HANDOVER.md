@@ -92,7 +92,9 @@ analyzer.analyze(
 `ClipAnalysis` contains a `VideoSource`, ordered timestamped `transcript`
 segments, and ranked `candidates` with start/end times, transcript, score, and
 rationale. Candidate windows are sampled across the source and capped at 32 per
-local-model ranking request to bound prompt size.
+local-model ranking request to bound prompt size. Ollama ranking uses a JSON
+response schema so required numeric scores and rationales are enforced before
+candidate parsing.
 
 The rendering interface compiles an ordered set of user-selected source ranges
 into one output file:

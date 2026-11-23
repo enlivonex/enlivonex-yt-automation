@@ -19,7 +19,13 @@ _SERVER_START_LOCK = threading.Lock()
 class JSONGenerator(Protocol):
     """Interface shared by the Ollama client and test doubles."""
 
-    def generate_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
+    def generate_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        response_schema: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         """Generate a JSON object from the supplied prompts."""
 
 
@@ -75,7 +81,13 @@ class OllamaClient:
                 f"Could not download Ollama model '{target}': {error}"
             ) from error
 
-    def generate_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
+    def generate_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        response_schema: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         """Request and parse a JSON object from Ollama."""
         try:
             self._ensure_server_and_model()
@@ -89,7 +101,7 @@ class OllamaClient:
                         {"role": "user", "content": user_prompt},
                     ],
                     "stream": False,
-                    "format": "json",
+                    "format": response_schema or "json",
                     "keep_alive": "5m",
                     "options": {"temperature": 0.7},
                 },
