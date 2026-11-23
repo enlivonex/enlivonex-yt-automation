@@ -1,0 +1,17 @@
+name = "enlivonex-automation"
+main = "worker.js"
+compatibility_date = "2026-11-05"
+
+[assets]
+directory = "../website"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "enlivonex-access"
+database_id = "4d48cde2-1c43-4db3-90c8-b769aa922dc8"
+
+[vars]
+GOOGLE_CLIENT_ID = "977043185694-5582nf0l32qir0mc5vrrcgq25rk5kovt.apps.googleusercontent.com"
+PUBLIC_DOWNLOAD_URL = "https://github.com/enlivonex/enlivonex-downloads/releases/download/v1.0.0/Enlivonex-Windows.zip"

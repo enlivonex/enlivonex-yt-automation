@@ -1,0 +1,163 @@
+name: Enlivonex YouTube Automation
+
+on:
+  # Manual trigger
+  workflow_dispatch:
+
+  # Scheduled runs (daily at 2 AM UTC)
+  schedule:
+    - cron: '0 2 * * *'
+
+  # Run tests on push
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run tests
+      run: |
+        pytest --cov=app --cov-report=term-missing
+
+    - name: Upload coverage
+      uses: codecov/codecov-action@v3
+      if: always()
+
+  automation:
+    name: Run Automation Pipeline
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install FFmpeg
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Create data directories
+      run: |
+        mkdir -p data/input data/output data/temp logs
+
+    - name: Create .env file
+      run: |
+        cat > .env << EOF
+        GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}
+        GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}
+        GOOGLE_DRIVE_FOLDER_ID=${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+        GOOGLE_TOKEN_FILE=data/google_token.json
+        YOUTUBE_CLIENT_SECRET_FILE=data/youtube_client_secret.json
+        YOUTUBE_TOKEN_FILE=data/youtube_token.json
+        YOUTUBE_PRIVACY_STATUS=private
+        DRY_RUN=true
+        OUTPUT_DIR=data/output
+        INPUT_DIR=data/input
+        TEMP_DIR=data/temp
+        DATABASE_PATH=data/automation.sqlite3
+        CAPTION_MAX_LENGTH=100
+        CAPTION_STYLE=dark_humor
+        CAPTION_FONT_SIZE=48
+        CAPTION_PADDING=20
+        CAPTION_BOG_COLOR=0,0,0,200
+        CAPTION_TEXT_COLOR=255,255,255,255
+        LOG_LEVEL=INFO
+        LOG_FILE=logs/automation.log
+        MAX_FILE_SIZE_MB=500
+        SUPPORTED_IMAGE_FORMATS=jpg,jpeg,png,webp
+        SUPPORTED_VIDEO_FORMATS=mp4,mov,webm,mkv
+        FFMPEG_PATH=ffmpeg
+        FFPROBE_PATH=ffprobe
+        EOF
+
+    - name: Create YouTube client secret
+      run: |
+        echo '${{ secrets.YOUTUBE_CLIENT_SECRET_JSON }}' > data/youtube_client_secret.json
+
+    - name: Restore OAuth tokens
+      uses: actions/cache@v3
+      with:
+        path: |
+          data/google_token.json
+          data/youtube_token.json
+        key: oauth-tokens-${{ github.sha }}
+        restore-keys: |
+          oauth-tokens-
+
+    - name: Check configuration
+      run: |
+        python -m app check-config
+
+    - name: Run automation pipeline (DRY_RUN)
+      run: |
+        python -m app run
+      continue-on-error: true
+
+    - name: Upload logs
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: automation-logs
+        path: logs/
+
+    - name: Upload processed files
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: processed-media
+        path: data/output/
+        retention-days: 7
+
+    - name: Save OAuth tokens
+      uses: actions/cache@v3
+      if: always()
+      with:
+        path: |
+          data/google_token.json
+          data/youtube_token.json
+        key: oauth-tokens-${{ github.sha }}
+
+  notify:
+    name: Send Notification
+    runs-on: ubuntu-latest
+    needs: automation
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+
+    steps:
+    - name: Workflow Status
+      run: |
+        if [ "${{ needs.automation.result }}" == "success" ]; then
+          echo "✓ Automation pipeline completed successfully"
+        else
+          echo "✗ Automation pipeline failed or was skipped"
+        fi

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex, nofollow">
+    <meta name="referrer" content="no-referrer">
+    <meta name="theme-color" content="#08111f">
+    <title>Beta access admin — Enlivonex</title>
+    <link rel="icon" href="assets/enlivonex.ico" sizes="any">
+    <link rel="stylesheet" href="styles.css">
+    <script src="admin.js" defer></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="index.html">
+        <img src="assets/enlivonex_mark.png" alt="" width="42" height="42">
+        <span>ENLIVON<span class="brand-accent">EX</span></span>
+      </a>
+      <a href="index.html">Public site</a>
+    </header>
+    <main class="section-wrap admin-page">
+      <p class="eyebrow">Private operations</p>
+      <h1>Beta access requests</h1>
+      <p class="admin-warning">Never share this admin secret. These request emails were verified as Gmail accounts. Add selected testers to the Google API test-user list when needed. Verify every ₹100 payment directly in your own account before issuing a code. Generated codes are shown once; copy and email them to the matching buyer yourself.</p>
+      <form class="waitlist-panel admin-login" id="admin-login">
+        <label for="admin-secret">Admin secret</label>
+        <input id="admin-secret" name="adminSecret" type="password" autocomplete="current-password" required>
+        <button class="button button-primary" type="submit">Open requests</button>
+        <button class="button button-outline" id="admin-logout" type="button" hidden>Clear admin secret</button>
+        <p class="form-status" id="admin-status" role="status" aria-live="polite"></p>
+      </form>
+      <section id="admin-results" aria-live="polite"></section>
+    </main>
+    <footer class="site-footer section-wrap">
+      <span>Access codes reveal a public download link; they do not activate the installed app or prevent link sharing.</span>
+    </footer>
+  </body>
+</html>

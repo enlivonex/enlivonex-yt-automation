@@ -1,0 +1,3 @@
+ADMIN_SECRET=local-only-change-me
+GOOGLE_CLIENT_ID=your-web-client-id.apps.googleusercontent.com
+PUBLIC_DOWNLOAD_URL=https://example.com/Enlivonex-Windows.zip
