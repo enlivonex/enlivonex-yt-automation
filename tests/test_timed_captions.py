@@ -160,6 +160,33 @@ def test_ass_export():
     assert "TEST" in ass  # uppercase
 
 
+def test_ass_export_uses_timed_word_highlighting():
+    segment = CaptionSegment(
+        words=[
+            CaptionWord("Hello", 1.0, 1.4),
+            CaptionWord("world.", 1.5, 1.9),
+        ],
+        text="Hello world.",
+        start_time=1.0,
+        end_time=1.9,
+    )
+    captions = TimedCaptions(
+        segments=[segment],
+        style=CaptionStyle(
+            font_color="#FFFFFF",
+            secondary_color="#FFE600",
+            uppercase=False,
+            word_highlight=True,
+        ),
+        total_duration=2.0,
+    )
+
+    ass = captions.to_ass()
+
+    assert r"{\k50}Hello {\k40}world." in ass
+    assert "&H0000E6FF" in ass
+
+
 def test_save_srt_file(tmp_path):
     """Test saving SRT file."""
     segments = [

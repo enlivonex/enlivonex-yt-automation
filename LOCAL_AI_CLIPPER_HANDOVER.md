@@ -12,24 +12,43 @@ generator or legacy Drive captioning pipeline.
 
 ## Intended user workflow
 
-1. Select a folder of source videos and choose whether to include subfolders.
-2. Select an input video and configure target duration, aspect ratio,
-   resolution, captions, and optional creative color grading.
-3. Analyze the video locally. Show progress and any unsupported or unreadable
-   files with actionable errors.
-4. Review AI-suggested moments with timestamps, transcript excerpts, and
-   previews. Allow users to adjust start/end times and choose moments.
-5. Render a draft locally. Support animated subtitles and optional zooms,
-   emojis, overlays from approved local assets, and user-controlled sharpening,
-   contrast, saturation, and grain for visual style.
-6. Preview the finished result, edit its YouTube metadata, and explicitly
-   confirm before uploading. Keep upload visibility private by default and
-   preserve existing public-upload safeguards.
+1. Choose one supported video from the computer.
+2. Confirm editing rights, choose a local speech model, and optionally select
+   the spoken language. Automatic language detection is the default.
+3. Set the suggested clip length and analyze locally.
+4. Review the suggestions, select moments, and adjust their start/end times.
+5. Choose the output format and captions. Optional styling controls include
+   frame fit, caption style, brightness, contrast, saturation, sharpness, and
+   grain. Creator credit is entered manually.
+6. Choose an MP4 destination, render, and open the local draft for review.
+   Upload remains a separate, explicitly confirmed YouTube workflow.
 
 ### Output behavior
 
 The first export compiles selected moments into one output video in the order
 chosen by the user. Separate output files per moment can be considered later.
+
+### Speech captions and grading
+
+- Faster-Whisper detects speech locally with voice-activity filtering and
+  automatic language detection by default. The desktop page also lets the user
+  choose a known speech language to avoid the extra language-detection pass on
+  long videos. `FASTER_WHISPER_MODEL_PATH` must point to an installed local
+  model; analysis does not download one implicitly.
+- Timed transcript captions are enabled by default and burned into the rendered
+  video. The user may turn them off for an individual render.
+- The desktop clipper defaults to a portrait composition with the source
+  centered over a darkened, blurred fill background and to a bold yellow,
+  black-outlined caption preset in the lower third. Cropped and padded layouts
+  and the standard caption style remain selectable. The preset adds no logo,
+  subscription prompt, or other promotional text.
+- An optional creator name can be entered to show a persistent `Credits: ...`
+  overlay at the top of every selected moment, even when speech captions are
+  disabled. The name is user-supplied; attribution does not replace permission
+  to edit or publish.
+- Sharpness, brightness, contrast, saturation, and grain are applied to the
+  rendered video using the selected control values. Their defaults are neutral;
+  setting values is for creative styling and does not avoid copyright claims.
 
 ## Scope and guardrails
 
@@ -222,22 +241,17 @@ The repository also contains an older Tkinter UI and CLI/Drive processing
 pipeline. The packaged app starts through `run_enlivonex.py`; verify which UI
 and workflow a change targets before editing documentation or shared code.
 
-## MVP recommendation
+## Current implementation baseline
 
-Keep the first deliverable small:
+The desktop page supports one local source video per job, local transcription
+and moment ranking, editable ranges, portrait/landscape/square rendering,
+timed captions, optional creator credit, and bounded image adjustments. It
+compiles selected moments into one MP4. Preserve this simple workflow and keep
+it separate from the topic-led video generator.
 
-- Select one local video from a chosen folder.
-- Probe it and generate a local timestamped transcript.
-- Produce ranked candidate moments within configurable minimum/maximum
-  durations.
-- Let the user adjust and select moments.
-- Render a vertical draft with readable timed captions and a simple crop.
-- Preview locally; leave upload as an explicit follow-up step or reuse the
-  existing reviewed-upload flow if it can be connected cleanly.
-
-Defer advanced animated styles, automatic zooms, emoji/GIF asset placement,
-multi-video batch processing, and elaborate timeline editing until the
-end-to-end clip selection and rendering path is stable.
+Not included: automatic creator identification, multi-video batch jobs,
+face-tracking reframing, cloud processing, direct video-URL fetching, or a
+separate web server. Add those only after an explicit product decision.
 
 ## Acceptance criteria
 
@@ -256,6 +270,10 @@ end-to-end clip selection and rendering path is stable.
   boundaries. Source files are never modified.
 - Analysis and rendering do not upload source media to a service.
 - YouTube upload is optional, reviewed, and requires explicit confirmation.
+- Preparing a rendered draft opens the existing upload review only; it does not
+  upload. Repurpose drafts ignore neighboring `metadata.json` files and start
+  with private visibility, while upload still requires the existing explicit
+  confirmation.
 
 ## Tests and validation
 
@@ -280,3 +298,71 @@ end-to-end clip selection and rendering path is stable.
    model/dependency/licensing decisions.
 4. Do not commit `.env`, account tokens, local databases, source videos, or
    generated media.
+
+## Frontend handoff for a teammate
+
+### What users do
+
+1. Open **04 - Local AI clipper** in the Enlivonex desktop app.
+2. Choose a video and confirm they have permission to edit it.
+3. Click **Analyze locally**, then select suggestions and adjust the times.
+4. Choose the output format and captions. Use **Show optional styling
+   controls** only when they want to change framing or image effects.
+5. Choose an output path, render the MP4, and review it before any YouTube
+   upload.
+
+### Where to make frontend changes
+
+- `app/pyside_gui.py` owns the app shell, side navigation, and the
+  `_build_repurpose_page` registration. Keep the existing page in the stack.
+- `app/repurpose/desktop.py` owns the clipper screen, buttons, form controls,
+  candidate table, status, and background worker. Keep long analysis/render
+  work off the UI thread.
+- `app/repurpose/service.py`, `transcription.py`, `moments.py`, `editing.py`,
+  and `renderer.py` own processing. Keep provider and FFmpeg details out of
+  the screen code.
+- `tests/test_repurpose_desktop.py` covers the UI wiring; the renderer and
+  repurpose tests cover output behavior.
+
+This is a native PySide6 screen styled to match the rest of Enlivonex. There is
+no Next.js frontend or separate FastAPI server. Keep the default screen simple;
+place less-used visual controls behind the optional styling section.
+
+### Run and test on Windows
+
+From the repository folder, create/activate a virtual environment and install
+the app dependencies:
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m pip install -r requirements-ai.txt
+python run_enlivonex.py
+```
+
+FFmpeg/FFprobe, Ollama, and an installed Faster-Whisper model are required for
+real processing. Set `FASTER_WHISPER_MODEL_PATH` and `OLLAMA_MODEL` in the
+local `.env`; never share that file. A developer can run the focused UI and
+render checks, then the full test directory:
+
+```powershell
+python -m pytest tests\test_repurpose_desktop.py tests\test_repurpose_renderer.py -q
+python -m pytest tests -q
+```
+
+### Build a Windows package to share
+
+Run this from PowerShell in the repository folder:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\package_windows.ps1 `
+  -Python .\.venv\Scripts\python.exe
+```
+
+The script creates `dist\Enlivonex-Windows.zip`. It rebuilds and replaces
+`build\Enlivonex` and `dist\Enlivonex-Windows`; back up any package you need to
+keep before running it. The package excludes `.env`, API keys, YouTube account
+tokens, source videos, local databases, and generated clips. Share source-code
+changes through the repository or a pull request, not by sending those private
+files.

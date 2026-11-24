@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -88,6 +87,8 @@ class _RepurposeWorker(QThread):
 class LocalClipperPage(QWidget):
     """Local-only analysis, moment review, and draft rendering page."""
 
+    prepare_upload_requested = Signal(str)
+
     def __init__(
         self,
         env_file: Path = Path(".env"),
@@ -112,18 +113,18 @@ class LocalClipperPage(QWidget):
         outer.setContentsMargins(8, 4, 8, 4)
         outer.setSpacing(14)
 
-        title = QLabel("Local AI clipper")
+        title = QLabel("Make clips from your video")
         title.setObjectName("pageTitle")
         outer.addWidget(title)
         subtitle = QLabel(
-            "Analyze a video on this PC, review and adjust suggested moments, "
-            "then render a local draft. Source media is not uploaded."
+            "Choose a video, review suggested moments, and save a short-form "
+            "draft. Everything stays on this PC."
         )
         subtitle.setObjectName("pageSubtitle")
         subtitle.setWordWrap(True)
         outer.addWidget(subtitle)
 
-        source_card, source_layout = self._card("Source and local models")
+        source_card, source_layout = self._card("1. Choose a video")
         source_row = QHBoxLayout()
         self.source_path = QLineEdit()
         self.source_path.setReadOnly(True)
@@ -149,25 +150,41 @@ class LocalClipperPage(QWidget):
         from app.config.settings import load_settings
 
         self.ollama_model.setText(load_settings().ollama_model)
+        self.transcription_language = QComboBox()
+        for label, language in (
+            ("Auto-detect", None),
+            ("English", "en"),
+            ("Hindi", "hi"),
+            ("Spanish", "es"),
+            ("French", "fr"),
+            ("German", "de"),
+            ("Portuguese", "pt"),
+            ("Arabic", "ar"),
+            ("Chinese", "zh"),
+            ("Japanese", "ja"),
+            ("Russian", "ru"),
+        ):
+            self.transcription_language.addItem(label, language)
         settings_row = QFormLayout()
         settings_row.addRow("Ollama model (local server)", self.ollama_model)
+        settings_row.addRow("Speech language", self.transcription_language)
         source_layout.addLayout(settings_row)
         outer.addWidget(source_card)
 
-        analysis_card, analysis_layout = self._card("Analyze and review")
+        analysis_card, analysis_layout = self._card("2. Find and select moments")
         analysis_options = QFormLayout()
-        self.min_duration = self._duration_spin(15)
+        self.min_duration = self._duration_spin(30)
         self.max_duration = self._duration_spin(60)
         self.max_candidates = QSpinBox()
         self.max_candidates.setRange(1, 16)
-        self.max_candidates.setValue(8)
+        self.max_candidates.setValue(5)
         analysis_options.addRow("Minimum moment length (seconds)", self.min_duration)
         analysis_options.addRow("Maximum moment length (seconds)", self.max_duration)
         analysis_options.addRow("Suggestions to review", self.max_candidates)
         analysis_layout.addLayout(analysis_options)
 
         self.rights_confirmation = QCheckBox(
-            "I have permission to edit this video and its included material."
+            "I have permission to edit and publish this video and its included material."
         )
         analysis_layout.addWidget(self.rights_confirmation)
 
@@ -195,8 +212,7 @@ class LocalClipperPage(QWidget):
         analysis_layout.addWidget(self.candidate_table)
         outer.addWidget(analysis_card, 1)
 
-        render_card, render_layout = self._card("Draft output")
-        render_fields = QGridLayout()
+        render_card, render_layout = self._card("3. Style and save")
         self.resolution = QComboBox()
         self.resolution.addItem("Portrait - 1080 x 1920", (1080, 1920))
         self.resolution.addItem("Portrait - 720 x 1280", (720, 1280))
@@ -205,27 +221,48 @@ class LocalClipperPage(QWidget):
         self.fit_mode = QComboBox()
         self.fit_mode.addItem("Fill frame (crop)", "crop")
         self.fit_mode.addItem("Fit whole frame (pad)", "pad")
+        self.fit_mode.addItem("Portrait with blurred background", "blurred")
+        self.fit_mode.setCurrentIndex(2)
+        self.caption_style = QComboBox()
+        self.caption_style.addItem("Standard", "standard")
+        self.caption_style.addItem("Bold yellow gaming", "gaming")
+        self.caption_style.setCurrentIndex(1)
         self.captions_enabled = QCheckBox("Burn transcript captions")
         self.captions_enabled.setChecked(True)
+        self.creator_credit = QLineEdit()
+        self.creator_credit.setMaxLength(100)
+        self.creator_credit.setPlaceholderText("YouTuber or source creator name")
+        basic_fields = QFormLayout()
+        basic_fields.addRow("Output format", self.resolution)
+        basic_fields.addRow("", self.captions_enabled)
+        basic_fields.addRow("Creator credit (optional)", self.creator_credit)
+        render_layout.addLayout(basic_fields)
+
+        self.advanced_style_button = QPushButton("Show optional styling controls")
+        self.advanced_style_button.setCheckable(True)
+        self.advanced_style_button.toggled.connect(
+            self._set_advanced_style_visible
+        )
+        render_layout.addWidget(self.advanced_style_button)
+
+        self.advanced_style_panel = QFrame()
+        self.advanced_style_panel.setObjectName("card")
+        advanced_fields = QFormLayout(self.advanced_style_panel)
+        advanced_fields.addRow("Frame fit", self.fit_mode)
+        advanced_fields.addRow("Caption style", self.caption_style)
         self.sharpness = self._adjustment_spin(0, 1.5, 0)
+        self.brightness = self._adjustment_spin(-1, 1, 0)
         self.contrast = self._adjustment_spin(0.5, 1.5, 1)
         self.saturation = self._adjustment_spin(0, 2, 1)
         self.grain = QSpinBox()
         self.grain.setRange(0, 20)
-        output_controls = (
-            ("Format", self.resolution),
-            ("Fit", self.fit_mode),
-            ("", self.captions_enabled),
-            ("Sharpness (0-1.5)", self.sharpness),
-            ("Contrast (0.5-1.5)", self.contrast),
-            ("Saturation (0-2)", self.saturation),
-            ("Grain (0-20)", self.grain),
-        )
-        for row, (label, control) in enumerate(output_controls):
-            if label:
-                render_fields.addWidget(QLabel(label), row, 0)
-            render_fields.addWidget(control, row, 1)
-        render_layout.addLayout(render_fields)
+        advanced_fields.addRow("Sharpness (0-1.5)", self.sharpness)
+        advanced_fields.addRow("Brightness (-1-1)", self.brightness)
+        advanced_fields.addRow("Contrast (0.5-1.5)", self.contrast)
+        advanced_fields.addRow("Saturation (0-2)", self.saturation)
+        advanced_fields.addRow("Grain (0-20)", self.grain)
+        self.advanced_style_panel.hide()
+        render_layout.addWidget(self.advanced_style_panel)
 
         output_row = QHBoxLayout()
         self.output_path = QLineEdit()
@@ -244,11 +281,15 @@ class LocalClipperPage(QWidget):
         self.open_output_button = QPushButton("Open rendered draft")
         self.open_output_button.setEnabled(False)
         self.open_output_button.clicked.connect(self._open_rendered_output)
+        self.prepare_upload_button = QPushButton("Prepare for YouTube review")
+        self.prepare_upload_button.setEnabled(False)
+        self.prepare_upload_button.clicked.connect(self._prepare_upload)
         self.cancel_button = QPushButton("Cancel task")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self._request_cancel)
         action_row.addWidget(self.render_button)
         action_row.addWidget(self.open_output_button)
+        action_row.addWidget(self.prepare_upload_button)
         action_row.addWidget(self.cancel_button)
         action_row.addStretch(1)
         render_layout.addLayout(action_row)
@@ -276,6 +317,14 @@ class LocalClipperPage(QWidget):
         heading.setObjectName("cardTitle")
         layout.addWidget(heading)
         return card, layout
+
+    def _set_advanced_style_visible(self, visible: bool) -> None:
+        self.advanced_style_panel.setVisible(visible)
+        self.advanced_style_button.setText(
+            "Hide optional styling controls"
+            if visible
+            else "Show optional styling controls"
+        )
 
     @staticmethod
     def _duration_spin(value: float) -> QDoubleSpinBox:
@@ -310,7 +359,10 @@ class LocalClipperPage(QWidget):
         self.analysis = None
         self.candidate_table.setRowCount(0)
         self.output_path.clear()
+        self.open_output_button.setProperty("path", "")
+        self.prepare_upload_button.setProperty("path", "")
         self.open_output_button.setEnabled(False)
+        self.prepare_upload_button.setEnabled(False)
         self.status.setText("Source selected. Analyze it to review suggestions.")
         self._update_actions()
 
@@ -389,6 +441,7 @@ class LocalClipperPage(QWidget):
             self.min_duration.value(),
             self.max_duration.value(),
             self.max_candidates.value(),
+            self.transcription_language.currentData(),
         )
         self._start_worker(
             "analysis",
@@ -412,6 +465,7 @@ class LocalClipperPage(QWidget):
             min_duration,
             max_duration,
             max_candidates,
+            language,
         ) = options
         settings = load_settings()
         analyzer = LocalClipAnalyzer(
@@ -430,6 +484,7 @@ class LocalClipperPage(QWidget):
             min_duration=min_duration,
             max_duration=max_duration,
             max_candidates=max_candidates,
+            language=language,
             progress_callback=report,
             cancel_event=cancel_event,
         )
@@ -494,11 +549,14 @@ class LocalClipperPage(QWidget):
             width=width,
             height=height,
             fit_mode=self.fit_mode.currentData(),
+            caption_style=self.caption_style.currentData(),
             burn_captions=self.captions_enabled.isChecked(),
             sharpness=self.sharpness.value(),
+            brightness=self.brightness.value(),
             contrast=self.contrast.value(),
             saturation=self.saturation.value(),
             grain=self.grain.value(),
+            creator_credit=self.creator_credit.text().strip(),
         )
         return ClipEditPlan(
             source=self.analysis.source,
@@ -601,7 +659,9 @@ class LocalClipperPage(QWidget):
                 self._operation_failed("Rendering returned an unexpected result.")
                 return
             self.open_output_button.setProperty("path", str(result.path))
+            self.prepare_upload_button.setProperty("path", str(result.path))
             self.open_output_button.setEnabled(result.path.is_file())
+            self.prepare_upload_button.setEnabled(result.path.is_file())
             self.status.setText(
                 f"Draft rendered: {result.path} "
                 f"({result.duration_seconds:.1f}s, {result.width}x{result.height})."
@@ -652,7 +712,7 @@ class LocalClipperPage(QWidget):
         if self.rights_confirmation.isChecked():
             return True
         self.status.setText(
-            "Confirm that you have permission to edit this video and its included material."
+            "Confirm that you have permission to edit and publish this video and its included material."
         )
         return False
 
@@ -667,6 +727,15 @@ class LocalClipperPage(QWidget):
                 "Could not open draft",
                 f"Open the rendered draft manually:\n{output}",
             )
+
+    def _prepare_upload(self) -> None:
+        if not self._confirm_rights():
+            return
+        output = self.prepare_upload_button.property("path")
+        if not output or not Path(output).is_file():
+            self.status.setText("The rendered draft could not be found.")
+            return
+        self.prepare_upload_requested.emit(str(output))
 
     def _update_actions(self) -> None:
         has_source = bool(self.source_path.text().strip())

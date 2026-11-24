@@ -5,7 +5,7 @@ from threading import Event
 from typing import Protocol
 
 from .cancellation import raise_if_cancelled
-from .models import TranscriptSegment
+from .models import TranscriptSegment, TranscriptWord
 
 
 class Transcriber(Protocol):
@@ -66,17 +66,42 @@ class FasterWhisperTranscriber:
                 language=language,
                 beam_size=self.beam_size,
                 vad_filter=True,
+                word_timestamps=True,
             )
             transcript = []
             for segment in segments:
                 raise_if_cancelled(cancel_event)
                 text = str(segment.text).strip()
                 if text:
+                    segment_start = float(segment.start)
+                    segment_end = float(segment.end)
+                    words = []
+                    previous_word_end = segment_start
+                    for word in getattr(segment, "words", None) or ():
+                        word_text = str(word.word).strip()
+                        if not word_text:
+                            continue
+                        word_start = max(
+                            segment_start,
+                            previous_word_end,
+                            float(word.start),
+                        )
+                        word_end = min(segment_end, float(word.end))
+                        if word_end > word_start:
+                            words.append(
+                                TranscriptWord(
+                                    start_seconds=word_start,
+                                    end_seconds=word_end,
+                                    text=word_text,
+                                )
+                            )
+                            previous_word_end = word_end
                     transcript.append(
                         TranscriptSegment(
-                            start_seconds=float(segment.start),
-                            end_seconds=float(segment.end),
+                            start_seconds=segment_start,
+                            end_seconds=segment_end,
                             text=text,
+                            words=tuple(words),
                         )
                     )
             raise_if_cancelled(cancel_event)

@@ -33,6 +33,7 @@ class CaptionStyle:
     font_family: str = "Arial"
     font_size: int = 24
     font_color: str = "#FFFFFF"
+    secondary_color: str = "#FFFFFF"
     outline_color: str = "#000000"
     outline_width: int = 2
     background_color: Optional[str] = None
@@ -41,6 +42,7 @@ class CaptionStyle:
     max_width_percent: float = 0.9
     uppercase: bool = True
     bold: bool = True
+    word_highlight: bool = False
 
 
 @dataclass
@@ -130,8 +132,8 @@ class TimedCaptions:
             "ScriptType: v4.00+",
             "",
             "[V4+ Styles]",
-            "Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Outline, Alignment",
-            f"Style: Default,{self.style.font_family},{self.style.font_size},{self._color_to_ass(self.style.font_color)},{self._color_to_ass(self.style.outline_color)},{self._color_to_ass(self.style.background_color or '#00000000')},{'-1' if self.style.bold else '0'},{self.style.outline_width},2",
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Outline, Alignment",
+            f"Style: Default,{self.style.font_family},{self.style.font_size},{self._color_to_ass(self.style.font_color)},{self._color_to_ass(self.style.secondary_color)},{self._color_to_ass(self.style.outline_color)},{self._color_to_ass(self.style.background_color or '#00000000')},{'-1' if self.style.bold else '0'},{self.style.outline_width},2",
             "",
             "[Events]",
             "Format: Start, End, Style, Text"
@@ -142,6 +144,21 @@ class TimedCaptions:
             start = self._format_ass_timestamp(segment.start_time)
             end = self._format_ass_timestamp(segment.end_time)
             text = segment.text.upper() if self.style.uppercase else segment.text
+            if self.style.word_highlight and segment.words:
+                timed_words = []
+                for index, word in enumerate(segment.words):
+                    next_start = (
+                        segment.words[index + 1].start_time
+                        if index + 1 < len(segment.words)
+                        else segment.end_time
+                    )
+                    duration_cs = max(
+                        1, round((next_start - word.start_time) * 100)
+                    )
+                    word_text = word.word.replace("\\", "\\\\")
+                    word_text = word_text.replace("{", "\\{").replace("}", "\\}")
+                    timed_words.append(f"{{\\k{duration_cs}}}{word_text}")
+                text = " ".join(timed_words)
             lines.append(f"Dialogue: {start},{end},Default,{text}")
 
         return "\n".join(lines)

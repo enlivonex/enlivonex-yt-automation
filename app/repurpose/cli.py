@@ -11,6 +11,7 @@ from .models import (
     ClipAnalysis,
     MomentCandidate,
     TranscriptSegment,
+    TranscriptWord,
     VideoSource,
 )
 from .moments import OllamaMomentRanker
@@ -73,7 +74,16 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--width", type=int, default=1080)
     render.add_argument("--height", type=int, default=1920)
     render.add_argument("--fps", type=int, default=30)
-    render.add_argument("--fit-mode", choices=("crop", "pad"), default="crop")
+    render.add_argument(
+        "--fit-mode",
+        choices=("crop", "pad", "blurred"),
+        default="crop",
+    )
+    render.add_argument(
+        "--caption-style",
+        choices=("standard", "gaming"),
+        default="standard",
+    )
     render.add_argument(
         "--sharpness",
         type=float,
@@ -104,6 +114,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="medium",
     )
     render.add_argument("--caption-font-size", type=int, default=48)
+    render.add_argument(
+        "--creator-credit",
+        default="",
+        help="Optional creator name to show as a credit at the top of each clip.",
+    )
     render.add_argument(
         "--no-captions",
         action="store_true",
@@ -185,6 +200,7 @@ def _render(args: argparse.Namespace) -> None:
             height=args.height,
             fps=args.fps,
             fit_mode=args.fit_mode,
+            caption_style=args.caption_style,
             quality_preset=args.quality_preset,
             burn_captions=not args.no_captions,
             caption_font_size=args.caption_font_size,
@@ -192,6 +208,7 @@ def _render(args: argparse.Namespace) -> None:
             contrast=args.contrast,
             saturation=args.saturation,
             grain=args.grain,
+            creator_credit=args.creator_credit,
         ),
     )
     result = LocalClipRenderer().render(plan, args.output.expanduser())
@@ -244,7 +261,16 @@ def _read_analysis(path: Path) -> ClipAnalysis:
     source_data["path"] = Path(source_data["path"])
     source = VideoSource(**source_data)
     transcript = tuple(
-        TranscriptSegment(**segment) for segment in transcript_data
+        TranscriptSegment(
+            **{
+                **segment,
+                "words": tuple(
+                    TranscriptWord(**word)
+                    for word in segment.get("words", [])
+                ),
+            }
+        )
+        for segment in transcript_data
     )
     candidates = tuple(
         MomentCandidate(**candidate) for candidate in candidates_data

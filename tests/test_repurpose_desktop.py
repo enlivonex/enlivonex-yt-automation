@@ -54,6 +54,7 @@ def create_analysis(tmp_path: Path) -> ClipAnalysis:
 def test_review_controls_create_selected_edit_plan(tmp_path, qapplication):
     analysis = create_analysis(tmp_path)
     page = desktop.LocalClipperPage(env_file=tmp_path / "settings.env")
+    assert page.captions_enabled.isChecked()
     page.rights_confirmation.setChecked(True)
     page._populate_candidates(analysis)
     page.candidate_table.item(0, 0).setCheckState(Qt.CheckState.Checked)
@@ -65,9 +66,11 @@ def test_review_controls_create_selected_edit_plan(tmp_path, qapplication):
     end.setValue(9.25)
     page.resolution.setCurrentIndex(1)
     page.sharpness.setValue(0.5)
+    page.brightness.setValue(0.2)
     page.contrast.setValue(1.1)
     page.saturation.setValue(1.2)
     page.grain.setValue(4)
+    page.creator_credit.setText("Example Creator")
 
     plan = page._create_edit_plan()
 
@@ -75,10 +78,31 @@ def test_review_controls_create_selected_edit_plan(tmp_path, qapplication):
         (2.5, 9.25)
     ]
     assert (plan.settings.width, plan.settings.height) == (720, 1280)
+    assert plan.settings.fit_mode == "blurred"
+    assert plan.settings.caption_style == "gaming"
+    assert plan.settings.burn_captions
     assert plan.settings.sharpness == 0.5
+    assert plan.settings.brightness == 0.2
     assert plan.settings.contrast == 1.1
     assert plan.settings.saturation == 1.2
     assert plan.settings.grain == 4
+    assert plan.settings.creator_credit == "Example Creator"
+    page.close()
+
+
+def test_optional_style_controls_are_hidden_until_requested(
+    tmp_path, qapplication
+):
+    page = desktop.LocalClipperPage(env_file=tmp_path / "settings.env")
+
+    assert page.min_duration.value() == 30
+    assert page.max_candidates.value() == 5
+    assert page.advanced_style_panel.isHidden()
+
+    page.advanced_style_button.click()
+    assert not page.advanced_style_panel.isHidden()
+    page.advanced_style_button.click()
+    assert page.advanced_style_panel.isHidden()
     page.close()
 
 
@@ -135,12 +159,14 @@ def test_desktop_analysis_uses_loopback_ollama_and_reports_stages(
             15,
             60,
             8,
+            "en",
         ),
         callbacks.append,
         Event(),
     )
 
     assert result is analysis
+    assert callbacks == ["Transcribing locally..."]
     assert client_options == [
         {
             "base_url": "http://127.0.0.1:11434",
@@ -148,7 +174,29 @@ def test_desktop_analysis_uses_loopback_ollama_and_reports_stages(
             "timeout_seconds": 45,
         }
     ]
-    assert callbacks == ["Transcribing locally..."]
+    analyze_options = []
+    monkeypatch.setattr(
+        desktop,
+        "LocalClipAnalyzer",
+        lambda **_kwargs: SimpleNamespace(
+            analyze=lambda _path, **kwargs: analyze_options.append(kwargs)
+            or analysis
+        ),
+    )
+    desktop.LocalClipperPage._analyze(
+        (
+            analysis.source.path,
+            model_path,
+            "qwen2.5:3b",
+            15,
+            60,
+            8,
+            "en",
+        ),
+        callbacks.append,
+        Event(),
+    )
+    assert analyze_options[0]["language"] == "en"
 
 
 def test_cancel_button_stops_worker_and_restores_page(tmp_path, qapplication):

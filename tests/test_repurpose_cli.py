@@ -11,6 +11,7 @@ from app.repurpose.models import (
     ClipAnalysis,
     MomentCandidate,
     TranscriptSegment,
+    TranscriptWord,
     VideoSource,
 )
 
@@ -31,7 +32,15 @@ def create_analysis(video_path):
     return ClipAnalysis(
         source=source,
         transcript=(
-            TranscriptSegment(1, 5, "First moment."),
+            TranscriptSegment(
+                1,
+                5,
+                "First moment.",
+                (
+                    TranscriptWord(1.1, 1.5, "First"),
+                    TranscriptWord(1.6, 2.0, "moment."),
+                ),
+            ),
             TranscriptSegment(10, 15, "Second moment."),
         ),
         candidates=(
@@ -123,6 +132,10 @@ def test_render_command_passes_selected_moments_as_one_compilation(
             "720",
             "--height",
             "1280",
+            "--fit-mode",
+            "blurred",
+            "--caption-style",
+            "gaming",
             "--sharpness",
             "0.75",
             "--contrast",
@@ -142,11 +155,14 @@ def test_render_command_passes_selected_moments_as_one_compilation(
     ] == [(10, 20), (0, 10)]
     assert plan.settings.width == 720
     assert plan.settings.height == 1280
+    assert plan.settings.fit_mode == "blurred"
+    assert plan.settings.caption_style == "gaming"
     assert plan.settings.burn_captions is False
     assert plan.settings.sharpness == 0.75
     assert plan.settings.contrast == 1.1
     assert plan.settings.saturation == 1.2
     assert plan.settings.grain == 5
+    assert plan.transcript[0].words[0].text == "First"
     assert captured["output_path"] == output
     assert "Rendered video:" in capsys.readouterr().out
 

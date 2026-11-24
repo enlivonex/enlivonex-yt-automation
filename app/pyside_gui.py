@@ -583,6 +583,9 @@ class PySideDashboard(QMainWindow):
 
     def _build_repurpose_page(self):
         self.repurpose_page = LocalClipperPage(env_file=ENV_FILE)
+        self.repurpose_page.prepare_upload_requested.connect(
+            self._prepare_repurpose_upload
+        )
         self._add_page(self.repurpose_page)
 
     def closeEvent(self, event):
@@ -1331,7 +1334,7 @@ class PySideDashboard(QMainWindow):
         if selected:
             self._select_upload_video(Path(selected))
 
-    def _select_upload_video(self, path):
+    def _select_upload_video(self, path, *, load_metadata=True):
         path = Path(path)
         if not path.is_file() or path.suffix.lower() != ".mp4":
             QMessageBox.critical(self, "Invalid video", "Choose an existing MP4 video file.")
@@ -1346,7 +1349,7 @@ class PySideDashboard(QMainWindow):
         self.upload_kids.setChecked(False)
 
         metadata_path = path.parent / "metadata.json"
-        if metadata_path.is_file():
+        if load_metadata and metadata_path.is_file():
             try:
                 metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
                 snippet = metadata.get("snippet", {})
@@ -1391,6 +1394,23 @@ class PySideDashboard(QMainWindow):
                     f"Could not read generated metadata; enter it manually. ({error})",
                 )
         self._update_upload_button_state()
+
+    def _prepare_repurpose_upload(self, output_path):
+        if self.active_task:
+            QMessageBox.information(
+                self,
+                "Another task is running",
+                "Wait for the current task to finish before preparing an upload.",
+            )
+            return
+        path = Path(output_path)
+        if not path.is_file() or path.suffix.lower() != ".mp4":
+            QMessageBox.critical(
+                self, "Invalid video", "The rendered draft is not an existing MP4."
+            )
+            return
+        self._select_upload_video(path, load_metadata=False)
+        self._show_page(2)
 
     def _generate_upload_metadata(self):
         if self.active_task:
@@ -1505,6 +1525,7 @@ class PySideDashboard(QMainWindow):
             "Confirm YouTube upload",
             f"Upload this video to YouTube?\n\nTitle: {metadata.title}\n"
             f"Visibility: {metadata.visibility}\nFile: {self.upload_path}\n\n"
+            "Confirm you have permission to publish this video and included material. "
             "This will upload the file and apply the selected visibility.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,

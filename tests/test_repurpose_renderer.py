@@ -8,7 +8,7 @@ from threading import Event
 import pytest
 
 from app.repurpose.editing import ClipEditPlan, ClipOutputSettings, ClipRange
-from app.repurpose.models import TranscriptSegment, VideoSource
+from app.repurpose.models import TranscriptSegment, TranscriptWord, VideoSource
 from app.repurpose.renderer import LocalClipRenderer
 from app.utils.ffmpeg import VideoInfo
 
@@ -104,9 +104,13 @@ def test_edit_plan_rejects_empty_or_out_of_bounds_ranges(tmp_path):
         {"height": 1919},
         {"fps": 0},
         {"fit_mode": "stretch"},
+        {"caption_style": "unknown"},
         {"quality_preset": "unknown"},
         {"sharpness": -0.1},
         {"sharpness": 1.6},
+        {"brightness": -1.1},
+        {"brightness": 1.1},
+        {"brightness": float("nan")},
         {"contrast": 1.6},
         {"contrast": float("nan")},
         {"saturation": -0.1},
@@ -114,6 +118,8 @@ def test_edit_plan_rejects_empty_or_out_of_bounds_ranges(tmp_path):
         {"grain": -1},
         {"grain": 21},
         {"grain": 1.5},
+        {"creator_credit": "name\nnot-a-single-line"},
+        {"creator_credit": "x" * 101},
     ],
 )
 def test_output_settings_reject_invalid_values(settings):
@@ -216,6 +222,7 @@ def test_renderer_applies_requested_creative_color_filters(tmp_path):
             height=1920,
             burn_captions=False,
             sharpness=0.8,
+            brightness=0.2,
             contrast=1.1,
             saturation=1.2,
             grain=6,
@@ -230,8 +237,107 @@ def test_renderer_applies_requested_creative_color_filters(tmp_path):
         ffmpeg.commands[0][0].index("-vf") + 1
     ]
     assert "luma_amount=0.8" in filter_graph
-    assert "eq=contrast=1.1:saturation=1.2" in filter_graph
+    assert "eq=brightness=0.2:contrast=1.1:saturation=1.2" in filter_graph
     assert "noise=alls=6:allf=t+u" in filter_graph
+
+
+def test_renderer_adds_creator_credit_even_without_transcript_captions(tmp_path):
+    source = create_source(tmp_path / "source.mp4")
+    ffmpeg = FakeFFmpeg(output_duration=10)
+    plan = ClipEditPlan(
+        source,
+        (ClipRange(0, 10),),
+        settings=ClipOutputSettings(
+            burn_captions=False,
+            creator_credit="Creator {Name}",
+        ),
+    )
+    caption_path = tmp_path / "credit.ass"
+
+    LocalClipRenderer._write_segment_captions(
+        plan, plan.ranges[0], caption_path
+    )
+    LocalClipRenderer(ffmpeg, FakeCatalog(source)).render(
+        plan, tmp_path / "credited.mp4"
+    )
+    ass_text = caption_path.read_text(encoding="utf-8")
+    assert "Style: Credit,Arial,24," in ass_text
+    assert (
+        "Dialogue: 0:00:00.00,0:00:10.00,Credit,Credits: Creator \\{Name\\}"
+        in ass_text
+    )
+    filter_graph = ffmpeg.commands[0][0][
+        ffmpeg.commands[0][0].index("-vf") + 1
+    ]
+    assert "ass='" in filter_graph
+
+
+def test_gaming_caption_style_uses_yellow_outlined_text_in_lower_third(tmp_path):
+    source = create_source(tmp_path / "source.mp4")
+    plan = ClipEditPlan(
+        source,
+        (ClipRange(0, 10),),
+        transcript=(TranscriptSegment(1, 3, "A caption phrase"),),
+        settings=ClipOutputSettings(
+            width=720,
+            height=1280,
+            caption_style="gaming",
+        ),
+    )
+    captions_path = tmp_path / "gaming.ass"
+
+    LocalClipRenderer._write_segment_captions(
+        plan, plan.ranges[0], captions_path
+    )
+
+    ass_text = captions_path.read_text(encoding="utf-8")
+    assert "Style: Default,Arial,48,&H0000E6FF" in ass_text
+    assert "A CAPTION PHRASE" not in ass_text
+    assert "A caption phrase" in ass_text
+    assert r"{\an5\pos(360,922)}" in ass_text
+
+
+def test_gaming_captions_use_active_word_timing_when_available(tmp_path):
+    source = create_source(tmp_path / "source.mp4")
+    plan = ClipEditPlan(
+        source,
+        (ClipRange(0, 10),),
+        transcript=(
+            TranscriptSegment(
+                1,
+                3,
+                "A quick test.",
+                (
+                    TranscriptWord(1.0, 1.2, "A"),
+                    TranscriptWord(1.25, 1.6, "quick"),
+                    TranscriptWord(1.7, 2.0, "test."),
+                ),
+            ),
+        ),
+        settings=ClipOutputSettings(
+            width=720,
+            height=1280,
+            caption_style="gaming",
+        ),
+    )
+    captions_path = tmp_path / "word-timed.ass"
+
+    LocalClipRenderer._write_segment_captions(
+        plan, plan.ranges[0], captions_path
+    )
+
+    ass_text = captions_path.read_text(encoding="utf-8")
+    assert r"{\k25}A {\k45}quick {\k30}test." in ass_text
+    assert "&H00FFFFFF,&H0000E6FF" in ass_text
+
+
+def test_blurred_portrait_fit_builds_centered_sharp_video_over_dark_blur():
+    filter_graph = LocalClipRenderer._fit_filter(720, 1280, "blurred")
+
+    assert "split=2[background][foreground]" in filter_graph
+    assert "boxblur=20:2" in filter_graph
+    assert "brightness=-0.18:saturation=0.7" in filter_graph
+    assert "overlay=(W-w)/2:(H-h)/2" in filter_graph
 
 
 def test_renderer_reports_progress_and_stages(tmp_path):

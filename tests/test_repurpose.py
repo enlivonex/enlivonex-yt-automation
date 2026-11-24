@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.repurpose.models import TranscriptSegment
+from app.repurpose.models import TranscriptSegment, TranscriptWord
 from app.repurpose.moments import OllamaMomentRanker
 from app.repurpose.service import LocalClipAnalyzer
 from app.repurpose.source import LocalVideoCatalog
@@ -270,17 +270,29 @@ def test_faster_whisper_loads_model_in_local_files_only_mode(
     source = tmp_path / "source.mp4"
     source.write_bytes(b"video")
     constructor_args = []
+    transcribe_options = []
 
     class FakeWhisperModel:
         def __init__(self, *args, **kwargs):
             constructor_args.append((args, kwargs))
 
         def transcribe(self, path, **kwargs):
+            transcribe_options.append(kwargs)
             return (
                 iter(
                     [
                         SimpleNamespace(
-                            start=0.1, end=2.2, text=" Spoken words. "
+                            start=0.1,
+                            end=2.2,
+                            text=" Spoken words. ",
+                            words=[
+                                SimpleNamespace(
+                                    start=0.2, end=0.7, word=" Spoken"
+                                ),
+                                SimpleNamespace(
+                                    start=0.8, end=1.5, word=" words."
+                                ),
+                            ],
                         )
                     ]
                 ),
@@ -297,7 +309,18 @@ def test_faster_whisper_loads_model_in_local_files_only_mode(
     result = transcriber.transcribe(source, language="en")
 
     assert constructor_args[0][1]["local_files_only"] is True
-    assert result == (TranscriptSegment(0.1, 2.2, "Spoken words."),)
+    assert transcribe_options[0]["word_timestamps"] is True
+    assert result == (
+        TranscriptSegment(
+            0.1,
+            2.2,
+            "Spoken words.",
+            (
+                TranscriptWord(0.2, 0.7, "Spoken"),
+                TranscriptWord(0.8, 1.5, "words."),
+            ),
+        ),
+    )
 
 
 def test_faster_whisper_stops_between_transcript_segments(

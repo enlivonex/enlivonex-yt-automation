@@ -7,7 +7,12 @@ import tempfile
 from threading import Event
 from typing import Callable
 
-from ..captions.timed import CaptionSegment, CaptionStyle, TimedCaptions
+from ..captions.timed import (
+    CaptionSegment,
+    CaptionStyle,
+    CaptionWord,
+    TimedCaptions,
+)
 from ..utils.ffmpeg import FFmpegWrapper, VideoInfo
 from .cancellation import raise_if_cancelled
 from .editing import ClipEditPlan, ClipRange, RenderedClip
@@ -81,7 +86,7 @@ class LocalClipRenderer:
                     )
                 segment_path = working_directory / f"segment_{index:04d}.mp4"
                 caption_path = None
-                if plan.settings.burn_captions:
+                if plan.settings.burn_captions or plan.settings.creator_credit.strip():
                     caption_path = working_directory / f"captions_{index:04d}.ass"
                     self._write_segment_captions(
                         plan, clip_range, caption_path
@@ -188,9 +193,14 @@ class LocalClipRenderer:
                 f"luma_amount={settings.sharpness:g}:"
                 "chroma_msize_x=5:chroma_msize_y=5:chroma_amount=0"
             )
-        if settings.contrast != 1.0 or settings.saturation != 1.0:
+        if (
+            settings.brightness != 0.0
+            or settings.contrast != 1.0
+            or settings.saturation != 1.0
+        ):
             filters.append(
-                f"eq=contrast={settings.contrast:g}:"
+                f"eq=brightness={settings.brightness:g}:"
+                f"contrast={settings.contrast:g}:"
                 f"saturation={settings.saturation:g}"
             )
         if settings.grain:
@@ -257,6 +267,17 @@ class LocalClipRenderer:
                 f"scale={width}:{height}:force_original_aspect_ratio=increase,"
                 f"crop={width}:{height}"
             )
+        if fit_mode == "blurred":
+            return (
+                f"split=2[background][foreground];"
+                f"[background]scale={width}:{height}:"
+                f"force_original_aspect_ratio=increase,"
+                f"crop={width}:{height},boxblur=20:2,"
+                "eq=brightness=-0.18:saturation=0.7[background];"
+                f"[foreground]scale={width}:{height}:"
+                "force_original_aspect_ratio=decrease[foreground];"
+                "[background][foreground]overlay=(W-w)/2:(H-h)/2"
+            )
         return (
             f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
@@ -274,11 +295,36 @@ class LocalClipRenderer:
         clip_range: ClipRange,
         caption_path: Path,
     ) -> None:
+        gaming_style = plan.settings.caption_style == "gaming"
         captions = []
         for transcript_segment in plan.transcript:
             start = max(transcript_segment.start_seconds, clip_range.start_seconds)
             end = min(transcript_segment.end_seconds, clip_range.end_seconds)
             if end <= start:
+                continue
+            caption_words = []
+            for word in transcript_segment.words:
+                word_start = max(word.start_seconds, clip_range.start_seconds)
+                word_end = min(word.end_seconds, clip_range.end_seconds)
+                if word_end > word_start:
+                    caption_words.append(
+                        CaptionWord(
+                            word=word.text,
+                            start_time=word_start - clip_range.start_seconds,
+                            end_time=word_end - clip_range.start_seconds,
+                        )
+                    )
+            if caption_words:
+                for index in range(0, len(caption_words), 4):
+                    word_group = caption_words[index:index + 4]
+                    captions.append(
+                        CaptionSegment(
+                            words=word_group,
+                            text=" ".join(word.word for word in word_group),
+                            start_time=word_group[0].start_time,
+                            end_time=word_group[-1].end_time,
+                        )
+                    )
                 continue
             text = transcript_segment.text.replace("\\", "\\\\")
             text = text.replace("{", "\\{").replace("}", "\\}")
@@ -291,9 +337,18 @@ class LocalClipRenderer:
                 )
             )
         duration = clip_range.end_seconds - clip_range.start_seconds
+        caption_style = CaptionStyle(font_size=plan.settings.caption_font_size)
+        if gaming_style:
+            caption_style.font_color = "#FFE600"
+            caption_style.outline_width = 4
+            caption_style.uppercase = False
+            if any(caption.words for caption in captions):
+                caption_style.font_color = "#FFFFFF"
+                caption_style.secondary_color = "#FFE600"
+                caption_style.word_highlight = True
         timed_captions = TimedCaptions(
             segments=captions,
-            style=CaptionStyle(font_size=plan.settings.caption_font_size),
+            style=caption_style,
             total_duration=duration,
         )
         ass_text = timed_captions.to_ass().replace(
@@ -301,6 +356,33 @@ class LocalClipRenderer:
             f"ScriptType: v4.00+\nPlayResX: {plan.settings.width}\n"
             f"PlayResY: {plan.settings.height}",
         )
+        if gaming_style:
+            caption_y = round(plan.settings.height * 0.72)
+            positioning = (
+                r"{\an5\pos("
+                f"{plan.settings.width // 2},{caption_y}"
+                r")}"
+            )
+            ass_text = ass_text.replace(
+                ",Default,", f",Default,{positioning}"
+            )
+        creator_credit = plan.settings.creator_credit.strip()
+        if creator_credit:
+            credit_text = f"Credits: {creator_credit}"
+            credit_text = credit_text.replace("\\", "\\\\")
+            credit_text = credit_text.replace("{", "\\{").replace("}", "\\}")
+            credit_style = (
+                f"Style: Credit,Arial,{max(20, plan.settings.caption_font_size // 2)},"
+                "&H00FFFFFF,&H00000000,&H64000000,-1,2,8\n"
+            )
+            credit_event = (
+                f"Dialogue: 0:00:00.00,"
+                f"{TimedCaptions._format_ass_timestamp(duration)},"
+                f"Credit,{credit_text}\n"
+            )
+            ass_text = ass_text.replace(
+                "[Events]", f"{credit_style}\n[Events]"
+            ) + "\n" + credit_event
         caption_path.write_text(ass_text, encoding="utf-8")
 
     @staticmethod

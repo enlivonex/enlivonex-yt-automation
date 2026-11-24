@@ -14,6 +14,19 @@ Keep Windows updated, protect your account and device, do not share token files,
 
 A local-first automation pipeline for processing and uploading media content from Google Drive to YouTube. Built for testing and development with safety-first design principles.
 
+## Local AI video clipper
+
+The desktop app includes a dedicated local clipper page for selecting a video,
+reviewing and trimming AI-suggested moments, then rendering a portrait, square,
+or landscape draft. Speech can be auto-detected or assigned a known language.
+Captions, optional creator credits, brightness, contrast,
+saturation, sharpness, and grain are configurable before rendering. Processing
+uses the local Faster-Whisper, Ollama, and FFmpeg pipeline; source videos remain
+unchanged. The existing topic-led video generator and YouTube review safeguards
+remain separate and unchanged. See
+[LOCAL_AI_CLIPPER_HANDOVER.md](./LOCAL_AI_CLIPPER_HANDOVER.md) for the
+teammate-facing frontend and Windows build guide.
+
 ## Importing source footage
 
 The desktop app copies imported video files into the managed `data/clips` library before registering them. It never moves or deletes the originals, and duplicate content is not copied again. Name collisions are stored under a hash-suffixed filename rather than overwriting a different clip.
