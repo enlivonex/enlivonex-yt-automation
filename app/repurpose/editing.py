@@ -35,18 +35,61 @@ class ClipOutputSettings:
     quality_preset: str = "medium"
     burn_captions: bool = True
     caption_font_size: int = 48
+    sharpness: float = 0.0
+    brightness: float = 0.0
+    contrast: float = 1.0
+    saturation: float = 1.0
+    grain: int = 0
+    creator_credit: str = ""
+    caption_style: str = "standard"
+    hardware_acceleration: str = "cpu"
 
     def __post_init__(self) -> None:
         if self.width < 2 or self.height < 2 or self.width % 2 or self.height % 2:
             raise ValueError("Output width and height must be positive even numbers.")
         if self.fps < 1 or self.fps > 120:
             raise ValueError("Output frame rate must be between 1 and 120.")
-        if self.fit_mode not in {"crop", "pad"}:
-            raise ValueError("Fit mode must be 'crop' or 'pad'.")
+        if self.fit_mode not in {"crop", "pad", "blurred"}:
+            raise ValueError("Fit mode must be 'crop', 'pad', or 'blurred'.")
         if self.quality_preset not in {"ultrafast", "fast", "medium", "slow"}:
             raise ValueError("Unsupported FFmpeg quality preset.")
         if self.caption_font_size < 8 or self.caption_font_size > 160:
             raise ValueError("Caption font size must be between 8 and 160.")
+        adjustments = {
+            "sharpness": (self.sharpness, 0.0, 1.5),
+            "brightness": (self.brightness, -1.0, 1.0),
+            "contrast": (self.contrast, 0.5, 1.5),
+            "saturation": (self.saturation, 0.0, 2.0),
+        }
+        for name, (value, minimum, maximum) in adjustments.items():
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or not minimum <= value <= maximum
+            ):
+                raise ValueError(
+                    f"{name.capitalize()} must be between {minimum:g} and "
+                    f"{maximum:g}."
+                )
+        if (
+            isinstance(self.grain, bool)
+            or not isinstance(self.grain, int)
+            or not 0 <= self.grain <= 20
+        ):
+            raise ValueError("Grain must be an integer between 0 and 20.")
+        if (
+            not isinstance(self.creator_credit, str)
+            or len(self.creator_credit) > 100
+            or any(ord(character) < 32 for character in self.creator_credit)
+        ):
+            raise ValueError("Creator credit must be a single line of at most 100 characters.")
+        if self.caption_style not in {"standard", "gaming"}:
+            raise ValueError("Caption style must be 'standard' or 'gaming'.")
+        if self.hardware_acceleration not in {"auto", "cpu", "cuda"}:
+            raise ValueError(
+                "Hardware acceleration must be 'auto', 'cpu', or 'cuda'."
+            )
 
 
 @dataclass(frozen=True)

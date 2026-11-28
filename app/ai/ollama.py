@@ -19,7 +19,13 @@ _SERVER_START_LOCK = threading.Lock()
 class JSONGenerator(Protocol):
     """Interface shared by the Ollama client and test doubles."""
 
-    def generate_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
+    def generate_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        response_schema: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         """Generate a JSON object from the supplied prompts."""
 
 
@@ -32,11 +38,13 @@ class OllamaClient:
         model: str = "qwen2.5:3b",
         timeout_seconds: float = 300,
         server_start_timeout_seconds: float = 30,
+        cpu_only: bool = False,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout_seconds = timeout_seconds
         self.server_start_timeout_seconds = server_start_timeout_seconds
+        self.cpu_only = cpu_only
         self._model_requested = False
 
     def list_installed_models(self) -> list[str]:
@@ -75,8 +83,17 @@ class OllamaClient:
                 f"Could not download Ollama model '{target}': {error}"
             ) from error
 
-    def generate_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
+    def generate_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        response_schema: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         """Request and parse a JSON object from Ollama."""
+        options: Dict[str, Any] = {"temperature": 0.7}
+        if self.cpu_only:
+            options["num_gpu"] = 0
         try:
             self._ensure_server_and_model()
             self._model_requested = True
@@ -89,9 +106,9 @@ class OllamaClient:
                         {"role": "user", "content": user_prompt},
                     ],
                     "stream": False,
-                    "format": "json",
+                    "format": response_schema or "json",
                     "keep_alive": "5m",
-                    "options": {"temperature": 0.7},
+                    "options": options,
                 },
                 timeout=(5, self.timeout_seconds),
             )

@@ -42,6 +42,10 @@ def _retry_oauth_connection(operation: Callable[[], _OAuthResult]) -> _OAuthResu
     raise RuntimeError("Google OAuth connection retry ended unexpectedly.")
 
 
+class YouTubeReauthorizationRequired(RuntimeError):
+    """Raised when an existing YouTube profile needs a fresh OAuth grant."""
+
+
 class YouTubeUploader:
     """Handle YouTube video uploads with OAuth."""
 
@@ -75,7 +79,11 @@ class YouTubeUploader:
         """
         return self.credentials_path.exists()
 
-    def authenticate(self, allow_new_authorization: bool = True):
+    def authenticate(
+        self,
+        allow_new_authorization: bool = True,
+        force_reauthorization: bool = False,
+    ):
         """Authenticate with YouTube using OAuth 2.0.
 
         Raises:
@@ -88,12 +96,14 @@ class YouTubeUploader:
             )
 
         try:
+            from google.auth.exceptions import RefreshError
             from google.oauth2.credentials import Credentials
             from google_auth_oauthlib.flow import InstalledAppFlow
             from google.auth.transport.requests import Request
             from googleapiclient.discovery import build
             from google_auth_httplib2 import AuthorizedHttp
             import httplib2
+            from oauthlib.oauth2.rfc6749.errors import InvalidClientError
         except ImportError:
             raise RuntimeError(
                 "Google API packages not installed. Run: "
@@ -124,22 +134,39 @@ class YouTubeUploader:
         creds = None
 
         # Load existing token
-        if self.token_path.exists():
-            creds = Credentials.from_authorized_user_info(
-                read_protected_token(self.token_path), SCOPES
-            )
+        if self.token_path.exists() and not force_reauthorization:
+            try:
+                creds = Credentials.from_authorized_user_info(
+                    read_protected_token(self.token_path), SCOPES
+                )
+            except (OSError, RuntimeError, ValueError) as error:
+                if not allow_new_authorization:
+                    raise YouTubeReauthorizationRequired(
+                        "The saved YouTube token cannot be used. Reconnect this "
+                        "account from YouTube Setup."
+                    ) from error
 
         # Refresh or get new token
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
-                _retry_oauth_connection(
-                    lambda: creds.refresh(TimeoutRequest())
-                )
-            else:
+                try:
+                    _retry_oauth_connection(
+                        lambda: creds.refresh(TimeoutRequest())
+                    )
+                except RefreshError as error:
+                    if "invalid_client" in str(error).casefold():
+                        raise self._invalid_oauth_client_error() from error
+                    if not allow_new_authorization:
+                        raise YouTubeReauthorizationRequired(
+                            "YouTube authorization has expired or been revoked. "
+                            "Reconnect this account from YouTube Setup."
+                        ) from error
+                    creds = None
+            if not creds or not creds.valid:
                 if not allow_new_authorization:
-                    raise RuntimeError(
+                    raise YouTubeReauthorizationRequired(
                         "The selected YouTube account is not authorized. "
-                        "Connect it from YouTube Setup before uploading."
+                        "Connect it from YouTube Setup again before uploading."
                     )
                 class RetryingInstalledAppFlow(InstalledAppFlow):
                     def fetch_token(self, **kwargs):
@@ -153,20 +180,30 @@ class YouTubeUploader:
                 flow = RetryingInstalledAppFlow.from_client_secrets_file(
                     str(self.credentials_path), SCOPES
                 )
-                creds = flow.run_local_server(
-                    port=0,
-                    prompt="select_account",
-                    timeout_seconds=300,
-                )
-
-            # Save token
-            self.token_path.parent.mkdir(parents=True, exist_ok=True)
-            write_protected_token(self.token_path, creds.to_json())
+                try:
+                    creds = flow.run_local_server(
+                        port=0,
+                        access_type="offline",
+                        prompt="consent select_account",
+                        timeout_seconds=300,
+                    )
+                except InvalidClientError as error:
+                    raise self._invalid_oauth_client_error() from error
 
         media_http = self._create_media_http(httplib2)
         authorized_http = AuthorizedHttp(creds, http=media_http)
         self._youtube = build(
             'youtube', 'v3', http=authorized_http, cache_discovery=False
+        )
+        self.token_path.parent.mkdir(parents=True, exist_ok=True)
+        write_protected_token(self.token_path, creds.to_json())
+
+    def _invalid_oauth_client_error(self) -> RuntimeError:
+        return RuntimeError(
+            "YouTube rejected the OAuth client configured at "
+            f"'{self.credentials_path}'. Use a matching OAuth 2.0 Desktop app "
+            "JSON downloaded from Google Cloud Console; Google AI Studio/Gemini "
+            "API keys cannot be used for YouTube sign-in."
         )
 
     def _create_media_http(self, httplib2_module=None):
@@ -257,6 +294,11 @@ class YouTubeUploader:
                 try:
                     status, response = request.next_chunk(num_retries=2)
                 except Exception as error:
+                    if self._is_unauthorized_error(error):
+                        raise YouTubeReauthorizationRequired(
+                            "YouTube rejected this account's authorization. "
+                            "Reconnect the selected account and retry the upload."
+                        ) from error
                     if not (
                         isinstance(error, OSError)
                         or self._is_httplib2_transport_error(error)
@@ -327,9 +369,16 @@ class YouTubeUploader:
 
             return video_id
 
+        except YouTubeReauthorizationRequired:
+            raise
         except Exception as e:
             logger.exception("YouTube upload failed for job %s", job_id)
             raise RuntimeError(f"YouTube upload failed: {e}") from e
+
+    @staticmethod
+    def _is_unauthorized_error(error: Exception) -> bool:
+        response = getattr(error, "resp", None)
+        return getattr(response, "status", None) == 401
 
     @staticmethod
     def _is_httplib2_transport_error(error: Exception) -> bool:

@@ -1,13 +1,18 @@
 """Web research and a SQLite-backed local RAG store using Ollama embeddings."""
 
 from dataclasses import asdict, dataclass
+import base64
+import binascii
 import json
 import logging
 import math
 from pathlib import Path
 import re
+import time
 from typing import Any, Protocol
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
+
+import requests
 
 from ..database.db import Database
 
@@ -49,6 +54,8 @@ class ResearchService:
     MAX_DOCUMENT_BYTES = 15 * 1024 * 1024
     MAX_WEB_RESULTS = 5
     MAX_RETRIEVED_CHUNKS = 4
+    WEB_SEARCH_ATTEMPTS = 4
+    WEB_SEARCH_FALLBACK_BACKEND = "mojeek,yahoo,startpage"
 
     def __init__(
         self,
@@ -106,6 +113,7 @@ class ResearchService:
 
         warning = ""
         web_sources: list[ResearchSource] = []
+        web_context_parts: list[str] = []
         if self.web_enabled:
             try:
                 web_results = self._search_web(topic)
@@ -114,6 +122,9 @@ class ResearchService:
                     url = result["url"]
                     snippet = result["snippet"]
                     web_sources.append(ResearchSource(title, url, "web"))
+                    web_context_parts.append(
+                        f"Source: {title}\nURL: {url}\nEvidence: {snippet}"
+                    )
                     self._index_text(
                         text=f"{title}\n{snippet}",
                         source_id=f"web:{url}",
@@ -123,27 +134,52 @@ class ResearchService:
                         topic=topic,
                     )
             except (ImportError, RuntimeError, TimeoutError, OSError) as error:
-                warning = f"Web research was unavailable: {error}"
+                raise RuntimeError(
+                    "Online research failed, so no script was generated. "
+                    f"Check internet access and the web-search dependency: {error}"
+                ) from error
+            if not web_sources:
+                raise RuntimeError(
+                    "Online research returned no usable sources, so no script "
+                    "was generated. Try a more specific topic or disable online "
+                    "research to intentionally use offline mode."
+                )
         query_vector = self._generate_embedding(topic)
         if self._embedding_warning and self._embedding_warning not in warning:
             warning = " ".join(
                 part for part in (warning, self._embedding_warning) if part
             )
-        retrieved = self._retrieve(query_vector, topic)
-        if not retrieved:
+        retrieved = [
+            item
+            for item in self._retrieve(query_vector, topic)
+            if item["source_type"] == "local"
+        ]
+        if not self.web_enabled:
             warning = " ".join(
                 part
                 for part in (
                     warning,
-                    "No matching local research was found; generation will use "
-                    "the selected topic without retrieved evidence.",
+                    "Online web research is disabled. Generation uses local "
+                    "documents and model knowledge, which may be outdated.",
                 )
                 if part
             )
-            return ResearchResult(topic=topic, context="", sources=[], warning=warning)
+        if not retrieved:
+            if not web_context_parts:
+                warning = " ".join(
+                    part
+                    for part in (
+                        warning,
+                        "No matching local research was found; generation will "
+                        "use the selected topic without retrieved local evidence.",
+                    )
+                    if part
+                )
 
-        context_parts = []
+        context_parts = web_context_parts
         source_map: dict[str, ResearchSource] = {}
+        for source in web_sources:
+            source_map[source.url] = source
         for item in retrieved:
             source = ResearchSource(
                 title=item["source_name"],
@@ -173,16 +209,60 @@ class ResearchService:
                 "`pip install -r requirements-ai.txt`."
             ) from error
 
-        try:
-            results = DDGS().text(
-                f"{topic} reliable facts research",
-                max_results=self.MAX_WEB_RESULTS,
+        results: list[dict[str, Any]] = []
+        last_error: Exception | None = None
+        for attempt in range(self.WEB_SEARCH_ATTEMPTS):
+            backend = (
+                "auto"
+                if attempt % 2 == 0
+                else self.WEB_SEARCH_FALLBACK_BACKEND
             )
-        except (DDGSException, RuntimeError, TimeoutError, OSError) as error:
-            raise RuntimeError(
-                f"Search provider failed ({type(error).__name__})."
-            ) from error
+            query = (
+                topic
+                if attempt < 2
+                else f"{topic} reliable facts research"
+            )
+            try:
+                with DDGS(timeout=5) as search:
+                    results = search.text(
+                        query,
+                        max_results=self.MAX_WEB_RESULTS,
+                        backend=backend,
+                    )
+                normalized = self._normalize_search_results(results)
+                if normalized:
+                    return normalized
+                last_error = DDGSException(
+                    "Search returned no usable results."
+                )
+            except (DDGSException, RuntimeError, TimeoutError, OSError) as error:
+                last_error = error
+            if attempt + 1 < self.WEB_SEARCH_ATTEMPTS:
+                logger.warning(
+                    "Web search attempt %s/%s failed: %s",
+                    attempt + 1,
+                    self.WEB_SEARCH_ATTEMPTS,
+                    last_error,
+                )
+                time.sleep(min(attempt + 1, 2))
 
+        try:
+            results = self._search_bing(topic)
+            if results:
+                return results
+        except (ImportError, OSError, requests.RequestException, ValueError) as error:
+            logger.warning("Bing web search fallback failed: %s", error)
+            last_error = error
+
+        error = last_error or DDGSException("No results found.")
+        raise RuntimeError(
+            "Search provider failed after "
+            f"{self.WEB_SEARCH_ATTEMPTS} attempts "
+            f"({type(error).__name__}): {error}"
+        ) from error
+
+    @staticmethod
+    def _normalize_search_results(results: list[dict[str, Any]]) -> list[dict[str, str]]:
         normalized = []
         for item in results:
             if not isinstance(item, dict):
@@ -190,11 +270,109 @@ class ResearchService:
             title = str(item.get("title", "")).strip()
             url = str(item.get("href", item.get("url", ""))).strip()
             snippet = str(item.get("body", item.get("snippet", ""))).strip()
+            title = re.split(
+                r"\s+(?:-|\|)\s+YouTube", title, maxsplit=1, flags=re.IGNORECASE
+            )[0].rstrip(" -|")
+            title = title[:250]
+            snippet = re.sub(r"\s+", " ", snippet)[:1000]
             if title and url.startswith(("https://", "http://")) and snippet:
                 normalized.append(
                     {"title": title, "url": url, "snippet": snippet}
                 )
         return normalized
+
+    def _search_bing(self, topic: str) -> list[dict[str, str]]:
+        from lxml import etree, html
+
+        response = requests.get(
+            "https://www.bing.com/search",
+            params={"q": topic, "count": self.MAX_WEB_RESULTS},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        try:
+            document = html.fromstring(response.content)
+        except (etree.ParserError, ValueError):
+            logger.warning("Bing search returned an empty or unreadable page.")
+            return []
+        results = []
+        stop_words = {
+            "about",
+            "and",
+            "but",
+            "buy",
+            "download",
+            "for",
+            "from",
+            "game",
+            "games",
+            "get",
+            "how",
+            "into",
+            "official",
+            "play",
+            "site",
+            "the",
+            "this",
+            "that",
+            "what",
+            "when",
+            "where",
+            "with",
+        }
+        topic_terms = {
+            token
+            for token in re.findall(r"[a-z0-9]{3,}", topic.casefold())
+            if token not in stop_words
+        }
+        minimum_matches = min(2, len(topic_terms))
+        for node in document.xpath(
+            '//li[contains(concat(" ", normalize-space(@class), " "), " b_algo ")]'
+        ):
+            links = node.xpath(".//h2/a[1]")
+            snippets = node.xpath(
+                './/div[contains(concat(" ", normalize-space(@class), " "), '
+                '" b_caption ")]/p[1]'
+            )
+            if not links or not snippets:
+                continue
+            title = re.sub(r"\s+", " ", " ".join(links[0].itertext())).strip()
+            snippet = re.sub(
+                r"\s+", " ", " ".join(snippets[0].itertext())
+            ).strip()
+            snippet = re.sub(r"\s*Read more\s*$", "", snippet, flags=re.IGNORECASE)
+            url = self._unwrap_bing_url(links[0].get("href", ""))
+            hostname = (urlsplit(url).hostname or "").casefold()
+            searchable_text = f"{title} {snippet}".casefold()
+            matching_terms = sum(term in searchable_text for term in topic_terms)
+            if (
+                title
+                and snippet
+                and matching_terms >= minimum_matches
+                and url.startswith(("https://", "http://"))
+                and hostname != "bing.com"
+                and not hostname.endswith(".bing.com")
+            ):
+                results.append(
+                    {"title": title, "url": url, "snippet": snippet}
+                )
+                if len(results) >= self.MAX_WEB_RESULTS:
+                    break
+        return self._normalize_search_results(results)
+
+    @staticmethod
+    def _unwrap_bing_url(url: str) -> str:
+        encoded = parse_qs(urlsplit(url).query).get("u", [""])[0]
+        if not encoded.startswith("a1"):
+            return url
+        value = encoded[2:]
+        value += "=" * (-len(value) % 4)
+        try:
+            decoded = base64.urlsafe_b64decode(value).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError, ValueError):
+            return url
+        return decoded if decoded.startswith(("https://", "http://")) else url
 
     def _index_text(
         self,

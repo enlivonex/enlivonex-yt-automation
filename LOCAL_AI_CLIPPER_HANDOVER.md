@@ -12,24 +12,50 @@ generator or legacy Drive captioning pipeline.
 
 ## Intended user workflow
 
-1. Select a folder of source videos and choose whether to include subfolders.
-2. Select an input video and configure target duration, aspect ratio,
-   resolution, captions, and optional creative color grading.
-3. Analyze the video locally. Show progress and any unsupported or unreadable
-   files with actionable errors.
-4. Review AI-suggested moments with timestamps, transcript excerpts, and
-   previews. Allow users to adjust start/end times and choose moments.
-5. Render a draft locally. Support animated subtitles and optional zooms,
-   emojis, overlays from approved local assets, and user-controlled sharpening,
-   contrast, saturation, and grain for visual style.
-6. Preview the finished result, edit its YouTube metadata, and explicitly
-   confirm before uploading. Keep upload visibility private by default and
-   preserve existing public-upload safeguards.
+1. Choose one supported video from the computer and confirm editing rights.
+2. Select either AI-suggested moments or an exact source time range. In AI mode,
+   choose up to four suggestions to review; manual clips can be shorter than the
+   suggestion minimum and are limited to 90 seconds.
+3. Choose the output format and captions. Manual clips transcribe only the
+   selected audio range for captions. Optional styling controls include frame
+   fit, caption style, brightness, contrast, saturation, sharpness, and grain.
+   Creator credit is entered manually.
+4. Choose an MP4 filename prefix, render, and open the local drafts for review.
+   The desktop UI saves each selected moment as a separate numbered MP4 and
+   displays percentage progress with an approximate remaining-time estimate.
+   Upload remains a separate, explicitly confirmed YouTube workflow.
 
 ### Output behavior
 
-The first export compiles selected moments into one output video in the order
-chosen by the user. Separate output files per moment can be considered later.
+The desktop UI renders each selected moment to its own numbered MP4 file.
+Clipper settings, including the selected mode and output styling, are saved in
+the user's local `.env` preferences. The CLI `render` command continues to join
+selected moments into one MP4.
+
+### Speech captions and grading
+
+- Faster-Whisper detects speech locally with voice-activity filtering and
+  automatic language detection by default. The desktop page also lets the user
+  choose a known speech language to avoid the extra language-detection pass on
+  long videos. `FASTER_WHISPER_MODEL_PATH` must point to an installed local
+  model; analysis does not download one implicitly.
+- Timed transcript captions are enabled by default and burned into the rendered
+  video. The user may turn them off for an individual render.
+- Exact-time clips do not need a full-video analysis or Ollama moment ranking.
+  Their captions are transcribed from the selected audio range and shifted to
+  the original source timestamps for rendering.
+- The desktop clipper defaults to a portrait composition with the source
+  centered over a darkened, blurred fill background and to a bold yellow,
+  black-outlined caption preset in the lower third. Cropped and padded layouts
+  and the standard caption style remain selectable. The preset adds no logo,
+  subscription prompt, or other promotional text.
+- An optional creator name can be entered to show a persistent `Credits: ...`
+  overlay at the top of every selected moment, even when speech captions are
+  disabled. The name is user-supplied; attribution does not replace permission
+  to edit or publish.
+- Sharpness, brightness, contrast, saturation, and grain are applied to the
+  rendered video using the selected control values. Their defaults are neutral;
+  setting values is for creative styling and does not avoid copyright claims.
 
 ## Scope and guardrails
 
@@ -92,10 +118,13 @@ analyzer.analyze(
 `ClipAnalysis` contains a `VideoSource`, ordered timestamped `transcript`
 segments, and ranked `candidates` with start/end times, transcript, score, and
 rationale. Candidate windows are sampled across the source and capped at 32 per
-local-model ranking request to bound prompt size.
+local-model ranking request to bound prompt size. Ollama ranking uses a JSON
+response schema so required numeric scores and rationales are enforced before
+candidate parsing.
 
-The rendering interface compiles an ordered set of user-selected source ranges
-into one output file:
+The renderer accepts an ordered set of user-selected source ranges and compiles
+them into one output file. The desktop UI invokes it once per selected range to
+produce separate clips:
 
 ```python
 plan = ClipEditPlan(
@@ -109,9 +138,33 @@ rendered = LocalClipRenderer().render(plan, output_path)
 
 The renderer rechecks the source hash, never writes over the source, uses
 FFmpeg locally, optionally burns transcript captions, joins selected ranges,
-and validates the output dimensions, duration, and audio stream. The UI can
-consume these backend interfaces; the terminal workflow is implemented, while
-the desktop UI integration remains future work.
+and validates the output dimensions, duration, and audio stream. It also
+supports optional visual grading: sharpness `0-1.5`, contrast `0.5-1.5`,
+saturation `0-2`, and grain `0-20`. Defaults are neutral. These controls are
+for appearance only and are not intended to alter copyright status or evade
+claims.
+
+The packaged PySide6 app has a separate **Local AI clipper** page in
+`app/repurpose/desktop.py`. It selects one local source video and an installed
+Faster-Whisper model folder, runs analysis away from the UI thread, displays
+ranked moments for selection and timestamp adjustment, and renders a local
+draft. The model folder is saved as `FASTER_WHISPER_MODEL_PATH` in `.env`.
+Ranking always targets the loopback Ollama service (`127.0.0.1`); it does not
+reuse a remote story-provider endpoint. Users must confirm editing permission
+before analysis or rendering. Render progress is derived from FFmpeg output;
+the Cancel task button terminates an active FFmpeg process and removes its
+temporary files. Analysis cancellation is cooperative between inspection,
+transcription segments, and model operations. An in-flight Ollama request must
+return before its cancellation request can be applied.
+
+Moment finding always runs both Faster-Whisper transcription and local Ollama
+ranking on the CPU. **Render acceleration** remains a separate setting for
+FFmpeg encoding; Auto uses NVENC when NVIDIA hardware is detected and reports
+then retries on CPU if encoding fails. NVIDIA-only mode reports unavailable
+CUDA/NVENC instead of silently switching. CUDA/cuDNN runtime compatibility and
+FFmpeg's `h264_nvenc` support are required for NVIDIA rendering. The Settings
+page's **Scan this PC** result enables the NVIDIA-only render choice only when
+an NVIDIA GPU is detected; rendering stays CPU-only otherwise.
 
 The terminal workflow is available through `python -m app.repurpose.cli`:
 
@@ -121,15 +174,27 @@ python -m app.repurpose.cli analyze "C:\Videos\source.mp4" `
 
 python -m app.repurpose.cli render "C:\Videos\source.analysis.json" `
   --candidate 1 --candidate 3 `
+  --sharpness 0.5 --contrast 1.1 --saturation 1.1 --grain 4 `
   --output "C:\Videos\source-clips.mp4"
+
+python -m app.repurpose.cli clip "C:\Videos\source.mp4" `
+  --start 00:01:20 --end 00:02:35 `
+  --whisper-model "C:\models\faster-whisper-small" `
+  --caption-style gaming `
+  --output "C:\Videos\manual-clip.mp4"
 ```
 
 Analysis uses Faster-Whisper and the configured local Ollama model; rendering
 uses local FFmpeg. The output command joins the selected suggestions into one
-MP4. Optional AI dependencies are installed with
-`python -m pip install -r requirements-ai.txt`. Users must obtain the local
-Whisper and Ollama model files before analysis; model acquisition is not done
-implicitly while processing a video.
+MP4. The `clip` command renders one exact source range without running AI moment
+ranking. It accepts seconds, `MM:SS`, or `HH:MM:SS` start/end values, has no
+minimum duration, and rejects clips longer than 90 seconds. Captions are
+transcribed from only the selected audio range; pass `--no-captions` to skip
+transcription. The existing `analyze --min-duration` option continues to set a
+minimum length for AI-suggested candidates only. Optional AI dependencies are
+installed with `python -m pip install -r requirements-ai.txt`. Users must obtain
+the local Whisper and Ollama model files before analysis; model acquisition is
+not done implicitly while processing a video.
 
 ## Cost and offline expectations
 
@@ -143,18 +208,18 @@ to Google's platform availability and quotas.
 
 ### New workflow boundary
 
-Add a dedicated local-video-repurposing service/runner and a separate page or
-mode in the PySide6 desktop interface. Avoid adding the full workflow to the
-UI class or changing the semantics of the existing `JobOrchestrator`, which
-generates topic-led narration over selected background clips.
+Keep local-video repurposing in its feature package and a separate page in the
+PySide6 desktop interface. Avoid adding the full workflow to the main UI class
+or changing the semantics of the existing `JobOrchestrator`, which generates
+topic-led narration over selected background clips.
 
 Possible module names are suggestions, not requirements:
 
 - Continue the existing `app/repurpose/` package for source inspection,
   transcription, moment selection, and edit-plan models.
-- A `RepurposeJobRunner` (or equivalent) to coordinate analysis and rendering.
-- A new PySide6 workflow that calls the runner and reports stage/progress
-  events.
+- `app/repurpose/desktop.py` coordinates the separate UI workflow with
+  background workers and stage updates; it calls the existing analyzer and
+  renderer rather than changing the legacy video-generation runner.
 
 ### Processing stages
 
@@ -204,22 +269,18 @@ The repository also contains an older Tkinter UI and CLI/Drive processing
 pipeline. The packaged app starts through `run_enlivonex.py`; verify which UI
 and workflow a change targets before editing documentation or shared code.
 
-## MVP recommendation
+## Current implementation baseline
 
-Keep the first deliverable small:
+The desktop page supports one local source video per job, local transcription
+and moment ranking, editable ranges, portrait/landscape/square rendering,
+timed captions, optional creator credit, and bounded image adjustments. It
+exports up to four selected moments as separate MP4s, while the CLI retains its
+single-compilation behavior. Preserve this workflow and keep it separate from
+the topic-led video generator.
 
-- Select one local video from a chosen folder.
-- Probe it and generate a local timestamped transcript.
-- Produce ranked candidate moments within configurable minimum/maximum
-  durations.
-- Let the user adjust and select moments.
-- Render a vertical draft with readable timed captions and a simple crop.
-- Preview locally; leave upload as an explicit follow-up step or reuse the
-  existing reviewed-upload flow if it can be connected cleanly.
-
-Defer advanced animated styles, automatic zooms, emoji/GIF asset placement,
-color-grading controls, multi-video batch processing, and elaborate timeline
-editing until the end-to-end clip selection and rendering path is stable.
+Not included: automatic creator identification, multi-video batch jobs,
+face-tracking reframing, cloud processing, direct video-URL fetching, or a
+separate web server. Add those only after an explicit product decision.
 
 ## Acceptance criteria
 
@@ -232,10 +293,16 @@ editing until the end-to-end clip selection and rendering path is stable.
 - Optional image adjustments have validated ranges, neutral defaults, and
   focused tests; they are documented as creative styling and never as a way
   to avoid copyright claims.
-- The UI shows progress and supports cancellation without corrupting source
-  files or leaving a job marked completed incorrectly.
+- The UI shows analysis stages and keeps long-running work off the UI thread.
+  Render progress is determinate; cancellation terminates FFmpeg and cleans
+  temporary files, while analysis cancellation is applied at safe stage
+  boundaries. Source files are never modified.
 - Analysis and rendering do not upload source media to a service.
 - YouTube upload is optional, reviewed, and requires explicit confirmation.
+- Preparing a rendered draft opens the existing upload review only; it does not
+  upload. Repurpose drafts ignore neighboring `metadata.json` files and start
+  with private visibility, while upload still requires the existing explicit
+  confirmation.
 
 ## Tests and validation
 
@@ -243,6 +310,8 @@ editing until the end-to-end clip selection and rendering path is stable.
   discovery, duration/range validation, moment ranking with a fake local
   model, edit-plan serialization, and output-setting validation.
 - Use small synthetic video/audio fixtures for FFmpeg integration tests.
+- Test FFmpeg progress and cancellation with local subprocesses; cancellation
+  must not leave a published partial output or temporary render files.
 - Mock transcription/LLM and YouTube upload in automated tests; tests must not
   require network access, model downloads, or real YouTube accounts.
 - Run targeted tests for the changed modules, then the full test suite if
@@ -258,3 +327,71 @@ editing until the end-to-end clip selection and rendering path is stable.
    model/dependency/licensing decisions.
 4. Do not commit `.env`, account tokens, local databases, source videos, or
    generated media.
+
+## Frontend handoff for a teammate
+
+### What users do
+
+1. Open **04 - Local AI clipper** in the Enlivonex desktop app.
+2. Choose a video and confirm they have permission to edit it.
+3. Click **Analyze locally**, then select suggestions and adjust the times.
+4. Choose the output format and captions. Use **Show optional styling
+   controls** only when they want to change framing or image effects.
+5. Choose an output path, render the MP4, and review it before any YouTube
+   upload.
+
+### Where to make frontend changes
+
+- `app/pyside_gui.py` owns the app shell, side navigation, and the
+  `_build_repurpose_page` registration. Keep the existing page in the stack.
+- `app/repurpose/desktop.py` owns the clipper screen, buttons, form controls,
+  candidate table, status, and background worker. Keep long analysis/render
+  work off the UI thread.
+- `app/repurpose/service.py`, `transcription.py`, `moments.py`, `editing.py`,
+  and `renderer.py` own processing. Keep provider and FFmpeg details out of
+  the screen code.
+- `tests/test_repurpose_desktop.py` covers the UI wiring; the renderer and
+  repurpose tests cover output behavior.
+
+This is a native PySide6 screen styled to match the rest of Enlivonex. There is
+no Next.js frontend or separate FastAPI server. Keep the default screen simple;
+place less-used visual controls behind the optional styling section.
+
+### Run and test on Windows
+
+From the repository folder, create/activate a virtual environment and install
+the app dependencies:
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m pip install -r requirements-ai.txt
+python run_enlivonex.py
+```
+
+FFmpeg/FFprobe, Ollama, and an installed Faster-Whisper model are required for
+real processing. Set `FASTER_WHISPER_MODEL_PATH` and `OLLAMA_MODEL` in the
+local `.env`; never share that file. A developer can run the focused UI and
+render checks, then the full test directory:
+
+```powershell
+python -m pytest tests\test_repurpose_desktop.py tests\test_repurpose_renderer.py -q
+python -m pytest tests -q
+```
+
+### Build a Windows package to share
+
+Run this from PowerShell in the repository folder:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\package_windows.ps1 `
+  -Python .\.venv\Scripts\python.exe
+```
+
+The script creates `dist\Enlivonex-Windows.zip`. It rebuilds and replaces
+`build\Enlivonex` and `dist\Enlivonex-Windows`; back up any package you need to
+keep before running it. The package excludes `.env`, API keys, YouTube account
+tokens, source videos, local databases, and generated clips. Share source-code
+changes through the repository or a pull request, not by sending those private
+files.

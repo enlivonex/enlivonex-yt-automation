@@ -35,7 +35,40 @@ def test_ollama_client_posts_to_local_chat_api(monkeypatch):
     assert args[0] == "http://127.0.0.1:11434/api/chat"
     assert kwargs["json"]["model"] == "qwen2.5:3b"
     assert kwargs["json"]["stream"] is False
+    assert kwargs["json"]["format"] == "json"
+    assert kwargs["json"]["options"] == {"temperature": 0.7}
     assert kwargs["timeout"] == (5, 300)
+
+
+def test_ollama_client_can_force_cpu_inference(monkeypatch):
+    response = Mock()
+    response.json.return_value = {"message": {"content": '{"title": "Local"}'}}
+    response.raise_for_status.return_value = None
+    post = Mock(return_value=response)
+    monkeypatch.setattr(OllamaClient, "_ensure_server_and_model", Mock())
+    monkeypatch.setattr("app.ai.ollama.requests.post", post)
+
+    OllamaClient(cpu_only=True).generate_json("system", "user")
+
+    assert post.call_args.kwargs["json"]["options"] == {
+        "temperature": 0.7,
+        "num_gpu": 0,
+    }
+
+
+def test_ollama_client_sends_response_schema(monkeypatch):
+    schema = {"type": "object", "required": ["result"]}
+    response = Mock()
+    response.json.return_value = {"message": {"content": '{"result": "ok"}'}}
+    response.raise_for_status.return_value = None
+    post = Mock(return_value=response)
+    monkeypatch.setattr(OllamaClient, "_ensure_server_and_model", Mock())
+    monkeypatch.setattr("app.ai.ollama.requests.post", post)
+
+    result = OllamaClient().generate_json("system", "user", response_schema=schema)
+
+    assert result == {"result": "ok"}
+    assert post.call_args.kwargs["json"]["format"] == schema
 
 
 def test_ollama_client_generates_local_embedding(monkeypatch):

@@ -3,6 +3,7 @@
 import argparse
 from dataclasses import asdict
 import json
+import math
 from pathlib import Path
 
 from ..ai.ollama import OllamaClient
@@ -11,11 +12,16 @@ from .models import (
     ClipAnalysis,
     MomentCandidate,
     TranscriptSegment,
+    TranscriptWord,
     VideoSource,
 )
 from .moments import OllamaMomentRanker
 from .renderer import LocalClipRenderer
-from .service import LocalClipAnalyzer
+from .service import (
+    MAX_MANUAL_CLIP_SECONDS,
+    LocalClipAnalyzer,
+    LocalManualClipper,
+)
 from .source import LocalVideoCatalog
 from .transcription import FasterWhisperTranscriber
 
@@ -69,23 +75,119 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="1-based candidate number; repeat to join multiple moments.",
     )
-    render.add_argument("--output", type=Path, required=True)
-    render.add_argument("--width", type=int, default=1080)
-    render.add_argument("--height", type=int, default=1920)
-    render.add_argument("--fps", type=int, default=30)
-    render.add_argument("--fit-mode", choices=("crop", "pad"), default="crop")
-    render.add_argument(
+    _add_output_options(render)
+
+    clip = commands.add_parser(
+        "clip",
+        help="Render an exact source range, up to 90 seconds, with local captions.",
+    )
+    clip.add_argument("video", type=Path, help="Local source video.")
+    clip.add_argument(
+        "--start",
+        type=_parse_time,
+        required=True,
+        help="Clip start: seconds, MM:SS, or HH:MM:SS.",
+    )
+    clip.add_argument(
+        "--end",
+        type=_parse_time,
+        required=True,
+        help="Clip end: seconds, MM:SS, or HH:MM:SS; maximum clip length is 90s.",
+    )
+    clip.add_argument(
+        "--whisper-model",
+        type=Path,
+        help="Path to an already downloaded Faster-Whisper model directory.",
+    )
+    clip.add_argument("--language", help="Optional speech language code.")
+    _add_output_options(clip)
+    return parser
+
+
+def _add_output_options(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--output", type=Path, required=True)
+    command.add_argument("--width", type=int, default=1080)
+    command.add_argument("--height", type=int, default=1920)
+    command.add_argument("--fps", type=int, default=30)
+    command.add_argument(
+        "--fit-mode",
+        choices=("crop", "pad", "blurred"),
+        default="crop",
+    )
+    command.add_argument(
+        "--caption-style",
+        choices=("standard", "gaming"),
+        default="standard",
+    )
+    command.add_argument(
+        "--sharpness",
+        type=float,
+        default=0.0,
+        help="Creative sharpness adjustment from 0 to 1.5 (default: 0).",
+    )
+    command.add_argument(
+        "--contrast",
+        type=float,
+        default=1.0,
+        help="Creative contrast adjustment from 0.5 to 1.5 (default: 1).",
+    )
+    command.add_argument(
+        "--saturation",
+        type=float,
+        default=1.0,
+        help="Creative saturation adjustment from 0 to 2 (default: 1).",
+    )
+    command.add_argument(
+        "--grain",
+        type=int,
+        default=0,
+        help="Creative grain strength from 0 to 20 (default: 0).",
+    )
+    command.add_argument(
         "--quality-preset",
         choices=("ultrafast", "fast", "medium", "slow"),
         default="medium",
     )
-    render.add_argument("--caption-font-size", type=int, default=48)
-    render.add_argument(
+    command.add_argument("--caption-font-size", type=int, default=48)
+    command.add_argument(
+        "--creator-credit",
+        default="",
+        help="Optional creator name to show as a credit at the top of each clip.",
+    )
+    command.add_argument(
         "--no-captions",
         action="store_true",
-        help="Render selected moments without burning transcript captions.",
+        help="Do not burn captions; exact clips also skip transcription.",
     )
-    return parser
+
+
+def _parse_time(value: str) -> float:
+    parts = value.strip().split(":")
+    try:
+        if len(parts) == 1:
+            seconds = float(parts[0])
+        elif len(parts) == 2:
+            minutes = int(parts[0])
+            remainder = float(parts[1])
+            if minutes < 0 or not 0 <= remainder < 60:
+                raise ValueError
+            seconds = minutes * 60 + remainder
+        elif len(parts) == 3:
+            hours = int(parts[0])
+            minutes = int(parts[1])
+            remainder = float(parts[2])
+            if hours < 0 or not 0 <= minutes < 60 or not 0 <= remainder < 60:
+                raise ValueError
+            seconds = hours * 3600 + minutes * 60 + remainder
+        else:
+            raise ValueError
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "Time must be seconds, MM:SS, or HH:MM:SS."
+        ) from error
+    if not math.isfinite(seconds) or seconds < 0:
+        raise argparse.ArgumentTypeError("Time must be finite and non-negative.")
+    return seconds
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -94,8 +196,10 @@ def main(argv: list[str] | None = None) -> None:
     try:
         if args.command == "analyze":
             _analyze(args)
-        else:
+        elif args.command == "render":
             _render(args)
+        else:
+            _clip(args)
     except (OSError, RuntimeError, TypeError, ValueError, KeyError) as error:
         parser.exit(2, f"error: {error}\n")
 
@@ -111,9 +215,13 @@ def _analyze(args: argparse.Namespace) -> None:
 
     analyzer = LocalClipAnalyzer(
         catalog=LocalVideoCatalog(),
-        transcriber=FasterWhisperTranscriber(args.whisper_model),
+        transcriber=FasterWhisperTranscriber(args.whisper_model, device="cpu"),
         moment_ranker=OllamaMomentRanker(
-            OllamaClient(base_url=args.ollama_url, model=args.ollama_model)
+            OllamaClient(
+                base_url=args.ollama_url,
+                model=args.ollama_model,
+                cpu_only=True,
+            )
         ),
     )
     result = analyzer.analyze(
@@ -156,15 +264,7 @@ def _render(args: argparse.Namespace) -> None:
             for candidate in selected
         ),
         transcript=analysis.transcript,
-        settings=ClipOutputSettings(
-            width=args.width,
-            height=args.height,
-            fps=args.fps,
-            fit_mode=args.fit_mode,
-            quality_preset=args.quality_preset,
-            burn_captions=not args.no_captions,
-            caption_font_size=args.caption_font_size,
-        ),
+        settings=_output_settings(args),
     )
     result = LocalClipRenderer().render(plan, args.output.expanduser())
     print(f"Rendered video: {result.path}")
@@ -172,6 +272,55 @@ def _render(args: argparse.Namespace) -> None:
         f"Duration: {result.duration_seconds:.2f}s; "
         f"resolution: {result.width}x{result.height}; "
         f"audio: {'yes' if result.has_audio else 'no'}"
+    )
+
+
+def _clip(args: argparse.Namespace) -> None:
+    clip_range = ClipRange(args.start, args.end)
+    duration = clip_range.end_seconds - clip_range.start_seconds
+    if duration > MAX_MANUAL_CLIP_SECONDS:
+        raise ValueError("Manual clip length must not exceed 90 seconds.")
+    settings = _output_settings(args)
+    transcriber = None
+    if not args.no_captions:
+        if args.whisper_model is None:
+            raise ValueError(
+                "Provide --whisper-model to transcribe captions, or use "
+                "--no-captions."
+            )
+        transcriber = FasterWhisperTranscriber(args.whisper_model)
+    result = LocalManualClipper().render(
+        video_path=args.video.expanduser(),
+        start_seconds=clip_range.start_seconds,
+        end_seconds=clip_range.end_seconds,
+        output_path=args.output.expanduser(),
+        settings=settings,
+        transcriber=transcriber,
+        language=args.language,
+    )
+    print(f"Rendered video: {result.path}")
+    print(
+        f"Duration: {result.duration_seconds:.2f}s; "
+        f"resolution: {result.width}x{result.height}; "
+        f"audio: {'yes' if result.has_audio else 'no'}"
+    )
+
+
+def _output_settings(args: argparse.Namespace) -> ClipOutputSettings:
+    return ClipOutputSettings(
+        width=args.width,
+        height=args.height,
+        fps=args.fps,
+        fit_mode=args.fit_mode,
+        caption_style=args.caption_style,
+        quality_preset=args.quality_preset,
+        burn_captions=not args.no_captions,
+        caption_font_size=args.caption_font_size,
+        sharpness=args.sharpness,
+        contrast=args.contrast,
+        saturation=args.saturation,
+        grain=args.grain,
+        creator_credit=args.creator_credit,
     )
 
 
@@ -216,7 +365,16 @@ def _read_analysis(path: Path) -> ClipAnalysis:
     source_data["path"] = Path(source_data["path"])
     source = VideoSource(**source_data)
     transcript = tuple(
-        TranscriptSegment(**segment) for segment in transcript_data
+        TranscriptSegment(
+            **{
+                **segment,
+                "words": tuple(
+                    TranscriptWord(**word)
+                    for word in segment.get("words", [])
+                ),
+            }
+        )
+        for segment in transcript_data
     )
     candidates = tuple(
         MomentCandidate(**candidate) for candidate in candidates_data

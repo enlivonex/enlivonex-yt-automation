@@ -2,9 +2,11 @@
 
 import json
 import math
+import os
 import queue
 import random
 import sqlite3
+import sys
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -46,15 +48,47 @@ from app.gui_helpers import ACTIVITY_MESSAGES, JOB_PROGRESS, upload_job_id
 from app.metadata.generator import create_metadata_generator
 from app.metadata.models import YouTubeMetadata
 from app.orchestration.runner import LocalJobRunner
+from app.repurpose.desktop import LocalClipperPage
 from app.story.models import Story, StorySegment
 from app.story.provider import GEMINI_REQUEST_TIMEOUT_SECONDS
-from app.youtube.accounts import YouTubeAccountStore
-from app.youtube.uploader import YouTubeUploader
+from app.youtube.accounts import (
+    YouTubeAccountStore,
+    default_youtube_accounts_directory,
+)
+from app.youtube.uploader import (
+    YouTubeReauthorizationRequired,
+    YouTubeUploader,
+)
 
 ENV_FILE = Path(".env")
+LAUNCH_DIRECTORY = Path.cwd()
+APP_DIRECTORY = (
+    Path(sys.executable).resolve().parent
+    if getattr(sys, "frozen", False)
+    else Path(__file__).resolve().parents[1]
+)
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 APP_ICON_PATH = ASSETS_DIR / "enlivonex.ico"
 BRAND_WORDMARK_PATH = ASSETS_DIR / "enlivonex_wordmark.png"
+
+
+def _resolve_app_path(path: Path) -> Path:
+    path = Path(path).expanduser()
+    if path.is_absolute():
+        return path
+    candidates = (APP_DIRECTORY / path, Path.cwd() / path)
+    return next(
+        (candidate.resolve() for candidate in candidates if candidate.exists()),
+        (APP_DIRECTORY / path).resolve(),
+    )
+
+
+def _migrate_web_research_setting() -> None:
+    if os.getenv("WEB_RESEARCH_SETTINGS_VERSION"):
+        return
+    set_key(str(ENV_FILE), "WEB_RESEARCH_ENABLED", "true")
+    set_key(str(ENV_FILE), "WEB_RESEARCH_SETTINGS_VERSION", "1")
+    load_dotenv(ENV_FILE, override=True)
 
 
 class PySideDashboard(QMainWindow):
@@ -71,6 +105,7 @@ class PySideDashboard(QMainWindow):
         if not ENV_FILE.exists():
             ENV_FILE.touch()
         load_dotenv(ENV_FILE, override=True)
+        _migrate_web_research_setting()
         # Create the schema before the dashboard reads upload and creation
         # counts. A clean install has no media.db yet, so limit checks would
         # otherwise fail while querying youtube_videos during window startup.
@@ -78,8 +113,14 @@ class PySideDashboard(QMainWindow):
             database.initialize()
         settings = load_settings()
         self.youtube_accounts = YouTubeAccountStore(
-            Path("data/youtube_accounts"),
-            legacy_token_path=settings.youtube_token_file,
+            default_youtube_accounts_directory(),
+            legacy_token_path=_resolve_app_path(settings.youtube_token_file),
+        )
+        self.youtube_accounts.migrate_legacy_profiles(
+            [
+                LAUNCH_DIRECTORY / "data" / "youtube_accounts",
+                APP_DIRECTORY / "data" / "youtube_accounts",
+            ]
         )
         self.youtube_accounts.migrate_legacy_token()
         self._account_labels = {}
@@ -101,6 +142,7 @@ class PySideDashboard(QMainWindow):
         self._build_create_page()
         self._build_settings_page()
         self._build_youtube_page()
+        self._build_repurpose_page()
         self._load_settings()
         self._refresh_recent_outputs()
         self._update_youtube_status()
@@ -230,6 +272,7 @@ class PySideDashboard(QMainWindow):
             ("01   Create video", 0),
             ("02   AI settings", 1),
             ("03   YouTube studio", 2),
+            ("04   Local AI clipper", 3),
         ):
             button = QPushButton(label)
             button.setObjectName("nav")
@@ -440,6 +483,12 @@ class PySideDashboard(QMainWindow):
         self.web_research_enabled = QCheckBox(
             "Enable online web research (requires internet)"
         )
+        self.web_research_note = QLabel(
+            "When enabled, Enlivonex uses live search snippets as script evidence "
+            "and will stop generation if no usable sources are found. When "
+            "disabled, it works offline but the model's knowledge may be outdated."
+        )
+        self.web_research_note.setWordWrap(True)
         form_layout = QFormLayout()
         form_layout.setHorizontalSpacing(18)
         form_layout.setVerticalSpacing(10)
@@ -451,6 +500,7 @@ class PySideDashboard(QMainWindow):
         form_layout.addRow("Ollama embedding model", self.ollama_embedding_model)
         form_layout.addRow("Ollama URL", self.ollama_base_url)
         form_layout.addRow("", self.web_research_enabled)
+        form_layout.addRow("", self.web_research_note)
         form.addLayout(form_layout)
 
         speech_card, speech = self._card("Narration and research")
@@ -512,6 +562,11 @@ class PySideDashboard(QMainWindow):
         self.connect_youtube_button = QPushButton("Add / connect account")
         self.connect_youtube_button.clicked.connect(self._connect_youtube)
         account_row.addWidget(self.connect_youtube_button)
+        self.reconnect_youtube_button = QPushButton("Reconnect selected")
+        self.reconnect_youtube_button.clicked.connect(
+            self._reconnect_youtube
+        )
+        account_row.addWidget(self.reconnect_youtube_button)
         self.remove_account_button = QPushButton("Remove")
         self.remove_account_button.clicked.connect(self._remove_youtube_account)
         account_row.addWidget(self.remove_account_button)
@@ -577,6 +632,25 @@ class PySideDashboard(QMainWindow):
         outer.addWidget(accounts_card)
         outer.addWidget(upload_card, 1)
         self._add_page(page)
+
+    def _build_repurpose_page(self):
+        self.repurpose_page = LocalClipperPage(env_file=ENV_FILE)
+        self.repurpose_page.prepare_upload_requested.connect(
+            self._prepare_repurpose_upload
+        )
+        self._add_page(self.repurpose_page)
+
+    def closeEvent(self, event):
+        if self.repurpose_page.is_busy:
+            QMessageBox.information(
+                self,
+                "Local task in progress",
+                "Wait for local analysis or rendering to finish before closing "
+                "the app. Source files remain unchanged.",
+            )
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _load_settings(self):
         settings = load_settings()
@@ -989,6 +1063,7 @@ class PySideDashboard(QMainWindow):
         self.research_docs_button.setEnabled(False)
         self.generate_upload_metadata_button.setEnabled(False)
         self._update_upload_button_state()
+        self._update_youtube_account_actions()
         if rotate_activity:
             self.activity_timer.start(random.randint(5000, 8000))
 
@@ -1018,6 +1093,7 @@ class PySideDashboard(QMainWindow):
         self.connect_youtube_button.setEnabled(True)
         self.research_docs_button.setEnabled(True)
         self._update_upload_button_state()
+        self._update_youtube_account_actions()
 
     def _process_events(self):
         while True:
@@ -1114,12 +1190,24 @@ class PySideDashboard(QMainWindow):
                 self._finish_task()
                 self._update_youtube_status()
                 QMessageBox.critical(self, "YouTube action failed", payload)
+            elif event == "youtube_reauth_required":
+                self._finish_task()
+                self._update_youtube_status()
+                QMessageBox.warning(
+                    self,
+                    "Reconnect YouTube account",
+                    f"{payload}\n\nUse Reconnect selected, then retry the upload.",
+                )
             elif event == "pc_scan_done":
                 scan, text = payload
                 self._last_scan = scan
                 self.scan_pc_button.setEnabled(True)
                 self.install_runtime_button.setEnabled(True)
                 self.pc_scan_status.setPlainText(text)
+                self.repurpose_page.update_gpu_availability(
+                    scan.hardware.has_nvidia,
+                    scan.hardware.gpu_name,
+                )
                 extras = scan.recommendation.compatible_story_models + scan.installed_ollama_models
                 self._set_model_combo(
                     self.ollama_model,
@@ -1223,9 +1311,18 @@ class PySideDashboard(QMainWindow):
         self._refresh_youtube_accounts()
         settings = load_settings()
         account = self._selected_youtube_account()
-        if account and self.youtube_accounts.token_path(account.account_id).is_file():
-            status = f"Connected account: {account.label}"
-        elif settings.youtube_client_secret_file.exists():
+        if account and account.reauth_required:
+            status = (
+                f"Reconnect required for '{account.label}'. Select Reconnect "
+                "selected to authorize this channel again."
+            )
+        elif account and self.youtube_accounts.token_path(
+            account.account_id
+        ).is_file():
+            status = f"Saved account: {account.label} (access verified on upload)"
+        elif account:
+            status = f"Account '{account.label}' needs to be connected."
+        elif _resolve_app_path(settings.youtube_client_secret_file).exists():
             status = "OAuth credentials ready - connect required"
         else:
             status = (
@@ -1250,6 +1347,22 @@ class PySideDashboard(QMainWindow):
             self.youtube_account_combo.setCurrentText(selected)
         self.youtube_account_combo.blockSignals(False)
         self._update_upload_button_state()
+        self._update_youtube_account_actions()
+
+    def _update_youtube_account_actions(self):
+        if not hasattr(self, "reconnect_youtube_button"):
+            return
+        account = self._selected_youtube_account()
+        configured = _resolve_app_path(
+            load_settings().youtube_client_secret_file
+        ).is_file()
+        self.reconnect_youtube_button.setEnabled(
+            not self.active_task and account is not None and configured
+        )
+        if hasattr(self, "remove_account_button"):
+            self.remove_account_button.setEnabled(
+                not self.active_task and account is not None
+            )
 
     def _selected_youtube_account(self):
         return self._account_labels.get(self.youtube_account_combo.currentText())
@@ -1262,6 +1375,7 @@ class PySideDashboard(QMainWindow):
             except (OSError, RuntimeError, ValueError) as error:
                 QMessageBox.critical(self, "Account selection failed", str(error))
         self._update_upload_button_state()
+        self._update_youtube_account_actions()
         self._refresh_limits_status()
 
     def _remove_youtube_account(self):
@@ -1312,7 +1426,7 @@ class PySideDashboard(QMainWindow):
         if selected:
             self._select_upload_video(Path(selected))
 
-    def _select_upload_video(self, path):
+    def _select_upload_video(self, path, *, load_metadata=True):
         path = Path(path)
         if not path.is_file() or path.suffix.lower() != ".mp4":
             QMessageBox.critical(self, "Invalid video", "Choose an existing MP4 video file.")
@@ -1327,7 +1441,7 @@ class PySideDashboard(QMainWindow):
         self.upload_kids.setChecked(False)
 
         metadata_path = path.parent / "metadata.json"
-        if metadata_path.is_file():
+        if load_metadata and metadata_path.is_file():
             try:
                 metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
                 snippet = metadata.get("snippet", {})
@@ -1372,6 +1486,23 @@ class PySideDashboard(QMainWindow):
                     f"Could not read generated metadata; enter it manually. ({error})",
                 )
         self._update_upload_button_state()
+
+    def _prepare_repurpose_upload(self, output_path):
+        if self.active_task:
+            QMessageBox.information(
+                self,
+                "Another task is running",
+                "Wait for the current task to finish before preparing an upload.",
+            )
+            return
+        path = Path(output_path)
+        if not path.is_file() or path.suffix.lower() != ".mp4":
+            QMessageBox.critical(
+                self, "Invalid video", "The rendered draft is not an existing MP4."
+            )
+            return
+        self._select_upload_video(path, load_metadata=False)
+        self._show_page(2)
 
     def _generate_upload_metadata(self):
         if self.active_task:
@@ -1442,8 +1573,11 @@ class PySideDashboard(QMainWindow):
             settings = load_settings()
             account = self._selected_youtube_account()
             ready = (
-                settings.youtube_client_secret_file.is_file()
+                _resolve_app_path(
+                    settings.youtube_client_secret_file
+                ).is_file()
                 and account is not None
+                and not account.reauth_required
                 and self.youtube_accounts.token_path(account.account_id).is_file()
             )
         self.upload_button.setEnabled(ready)
@@ -1486,6 +1620,7 @@ class PySideDashboard(QMainWindow):
             "Confirm YouTube upload",
             f"Upload this video to YouTube?\n\nTitle: {metadata.title}\n"
             f"Visibility: {metadata.visibility}\nFile: {self.upload_path}\n\n"
+            "Confirm you have permission to publish this video and included material. "
             "This will upload the file and apply the selected visibility.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -1549,7 +1684,9 @@ class PySideDashboard(QMainWindow):
                 database = Database(Path("data/media.db"))
                 uploader = YouTubeUploader(
                     db=database,
-                    credentials_path=settings.youtube_client_secret_file,
+                    credentials_path=_resolve_app_path(
+                        settings.youtube_client_secret_file
+                    ),
                     token_path=self.youtube_accounts.token_path(account.account_id),
                 )
                 uploader.authenticate(allow_new_authorization=False)
@@ -1573,6 +1710,18 @@ class PySideDashboard(QMainWindow):
                         {"video_id": video_id, "url": uploader.get_video_url(video_id)},
                     )
                 )
+            except YouTubeReauthorizationRequired as error:
+                try:
+                    self.youtube_accounts.set_reauth_required(
+                        account.account_id, True
+                    )
+                except (OSError, RuntimeError, ValueError) as state_error:
+                    error = RuntimeError(
+                        f"{error} Account state could not be saved: {state_error}"
+                    )
+                    self.events.put(("youtube_failed", str(error)))
+                    return
+                self.events.put(("youtube_reauth_required", str(error)))
             except Exception as error:
                 self.events.put(("youtube_failed", str(error)))
 
@@ -1580,7 +1729,10 @@ class PySideDashboard(QMainWindow):
 
     def _connect_youtube(self):
         settings = load_settings()
-        if not settings.youtube_client_secret_file.exists():
+        credentials_path = _resolve_app_path(
+            settings.youtube_client_secret_file
+        )
+        if not credentials_path.is_file():
             QMessageBox.critical(
                 self,
                 "OAuth credentials required",
@@ -1608,27 +1760,87 @@ class PySideDashboard(QMainWindow):
             QMessageBox.critical(self, "Invalid account name", str(error))
             return
         self._refresh_youtube_accounts()
+        self._authorize_youtube_account(
+            account, credentials_path, new_account=True
+        )
 
+    def _reconnect_youtube(self):
+        account = self._selected_youtube_account()
+        if not account:
+            QMessageBox.information(
+                self, "No account selected", "Select an account to reconnect."
+            )
+            return
+        credentials_path = _resolve_app_path(
+            load_settings().youtube_client_secret_file
+        )
+        if not credentials_path.is_file():
+            QMessageBox.critical(
+                self,
+                "OAuth credentials required",
+                "YouTube sign-in is not configured in this app. Contact the app "
+                "publisher.",
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            "Reconnect YouTube account",
+            f"A browser window will open. Sign into the Google account for "
+            f"'{account.label}' and approve upload access again. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._authorize_youtube_account(
+            account, credentials_path, new_account=False
+        )
+
+    def _authorize_youtube_account(
+        self, account, credentials_path: Path, *, new_account: bool
+    ):
         def authenticate():
             try:
                 database = Database(Path("data/media.db"))
                 uploader = YouTubeUploader(
                     db=database,
-                    credentials_path=settings.youtube_client_secret_file,
+                    credentials_path=credentials_path,
                     token_path=self.youtube_accounts.token_path(account.account_id),
                 )
-                uploader.authenticate()
+                uploader.authenticate(
+                    force_reauthorization=not new_account
+                )
+                self.youtube_accounts.set_reauth_required(
+                    account.account_id, False
+                )
                 self.events.put(("youtube_connected", account.label))
             except Exception as error:
-                token_path = self.youtube_accounts.token_path(account.account_id)
-                if not token_path.exists():
+                if new_account:
                     try:
                         self.youtube_accounts.remove_account(account.account_id)
-                    except (OSError, RuntimeError, ValueError):
-                        pass
+                    except (OSError, RuntimeError, ValueError) as cleanup_error:
+                        error = RuntimeError(
+                            f"{error} The failed account profile could not be "
+                            f"removed: {cleanup_error}"
+                        )
+                else:
+                    try:
+                        self.youtube_accounts.set_reauth_required(
+                            account.account_id, True
+                        )
+                    except (OSError, RuntimeError, ValueError) as state_error:
+                        error = RuntimeError(
+                            f"{error} Reauthorization state could not be saved: "
+                            f"{state_error}"
+                        )
                 self.events.put(("youtube_failed", str(error)))
 
-        self._begin_task("Connecting YouTube channel...", indeterminate=True)
+        task = (
+            "Connecting YouTube channel..."
+            if new_account
+            else f"Reconnecting '{account.label}'..."
+        )
+        self._begin_task(task, indeterminate=True)
         threading.Thread(target=authenticate, daemon=True).start()
 
     def _ask_account_name(self):
@@ -1650,6 +1862,8 @@ class PySideDashboard(QMainWindow):
 
 
 def main():
+    if getattr(sys, "frozen", False):
+        os.chdir(APP_DIRECTORY)
     application = QApplication.instance() or QApplication([])
     application.setApplicationName("Enlivonex YouTube Automation")
     if APP_ICON_PATH.is_file():

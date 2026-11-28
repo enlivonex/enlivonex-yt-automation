@@ -52,6 +52,11 @@ def collect_hardware(root: str | os.PathLike[str] = ".") -> HardwareInfo:
     )
 
 
+def has_nvidia_gpu() -> bool:
+    """Return whether an NVIDIA GPU is present on this PC."""
+    return _detect_gpu()[2]
+
+
 def _machine_id() -> str:
     if os.name == "nt":
         try:
@@ -155,7 +160,7 @@ def _windows_display_adapter() -> tuple[str, float, bool]:
                 "-NoProfile",
                 "-Command",
                 "(Get-CimInstance Win32_VideoController | "
-                "Select-Object -First 1 -ExpandProperty Name)",
+                "Select-Object -ExpandProperty Name)",
             ],
             capture_output=True,
             text=True,
@@ -163,10 +168,19 @@ def _windows_display_adapter() -> tuple[str, float, bool]:
             check=False,
             creationflags=hidden_process_creation_flags(),
         )
-        name = (completed.stdout or "").strip()
-        if name:
-            lowered = name.lower()
-            return name, 0.0, "nvidia" in lowered
+        names = [
+            line.strip()
+            for line in (completed.stdout or "").splitlines()
+            if line.strip()
+        ]
+        if names:
+            nvidia_name = next(
+                (name for name in names if "nvidia" in name.lower()),
+                None,
+            )
+            if nvidia_name:
+                return nvidia_name, 0.0, True
+            return names[0], 0.0, False
     except (OSError, subprocess.SubprocessError):
         pass
     return "Unknown GPU", 0.0, False

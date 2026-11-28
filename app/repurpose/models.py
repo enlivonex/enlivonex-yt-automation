@@ -37,8 +37,8 @@ class VideoSource:
 
 
 @dataclass(frozen=True)
-class TranscriptSegment:
-    """A transcript phrase and its time range in the source video."""
+class TranscriptWord:
+    """A single transcribed word with source-video timing."""
 
     start_seconds: float
     end_seconds: float
@@ -51,9 +51,39 @@ class TranscriptSegment:
             or self.start_seconds < 0
             or self.end_seconds <= self.start_seconds
         ):
+            raise ValueError("Transcript word must have a valid positive range.")
+        if not self.text.strip():
+            raise ValueError("Transcript word text cannot be empty.")
+
+
+@dataclass(frozen=True)
+class TranscriptSegment:
+    """A transcript phrase and its time range in the source video."""
+
+    start_seconds: float
+    end_seconds: float
+    text: str
+    words: tuple[TranscriptWord, ...] = ()
+
+    def __post_init__(self) -> None:
+        if (
+            not math.isfinite(self.start_seconds)
+            or not math.isfinite(self.end_seconds)
+            or self.start_seconds < 0
+            or self.end_seconds <= self.start_seconds
+        ):
             raise ValueError("Transcript segment must have a valid positive range.")
         if not self.text.strip():
             raise ValueError("Transcript segment text cannot be empty.")
+        previous_end = self.start_seconds
+        for word in self.words:
+            if (
+                word.start_seconds < previous_end
+                or word.start_seconds < self.start_seconds
+                or word.end_seconds > self.end_seconds
+            ):
+                raise ValueError("Transcript words must be ordered within their segment.")
+            previous_end = word.end_seconds
 
 
 @dataclass(frozen=True)

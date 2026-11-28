@@ -172,6 +172,11 @@ def format_scan(scan: SystemScan) -> str:
         f"Free disk: {hardware.disk_free_gb:g} GB",
         f"GPU: {hardware.gpu_name}"
         + (f" ({hardware.vram_gb:g} GB VRAM)" if hardware.vram_gb else ""),
+        (
+            "NVIDIA GPU detected; GPU-only clip mode is available after scanning."
+            if hardware.has_nvidia
+            else "No NVIDIA GPU detected; GPU-only clip mode is disabled."
+        ),
         "",
         scan.recommendation.reason,
         f"Compatible story models: {', '.join(scan.recommendation.compatible_story_models)}",

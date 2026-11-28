@@ -19,6 +19,22 @@ _ACCOUNT_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 class YouTubeAccount:
     account_id: str
     label: str
+    reauth_required: bool = False
+
+
+def default_youtube_accounts_directory() -> Path:
+    """Return a stable per-user directory for OAuth profiles and tokens."""
+    if os.name == "nt":
+        root = Path(
+            os.environ.get(
+                "LOCALAPPDATA", Path.home() / "AppData" / "Local"
+            )
+        )
+    else:
+        root = Path(
+            os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
+        )
+    return root / "Enlivonex" / "YouTube Automation" / "youtube_accounts"
 
 
 class YouTubeAccountStore:
@@ -37,7 +53,11 @@ class YouTubeAccountStore:
 
     def accounts(self) -> list[YouTubeAccount]:
         return [
-            YouTubeAccount(item["account_id"], item["label"])
+            YouTubeAccount(
+                item["account_id"],
+                item["label"],
+                item.get("reauth_required", False),
+            )
             for item in self._manifest["accounts"]
         ]
 
@@ -58,7 +78,11 @@ class YouTubeAccountStore:
 
         account = YouTubeAccount(uuid.uuid4().hex, label)
         self._manifest["accounts"].append(
-            {"account_id": account.account_id, "label": account.label}
+            {
+                "account_id": account.account_id,
+                "label": account.label,
+                "reauth_required": False,
+            }
         )
         self._manifest["active_account_id"] = account.account_id
         self._write_manifest()
@@ -88,6 +112,61 @@ class YouTubeAccountStore:
                 f"Removed account profile but could not delete its token file: "
                 f"{error}"
             ) from error
+
+    def set_reauth_required(
+        self, account_id: str, required: bool
+    ) -> YouTubeAccount:
+        if not isinstance(required, bool):
+            raise ValueError("Reauthorization state must be a boolean.")
+        item = self._find(account_id)
+        item["reauth_required"] = required
+        self._write_manifest()
+        return YouTubeAccount(
+            item["account_id"], item["label"], item["reauth_required"]
+        )
+
+    def migrate_legacy_profiles(self, directories: list[Path]) -> int:
+        """Copy the first existing legacy profile store into this stable store."""
+        if self._manifest["accounts"]:
+            return 0
+        target = self.directory.resolve()
+        for directory in directories:
+            legacy_directory = Path(directory).expanduser()
+            legacy_manifest = legacy_directory / "accounts.json"
+            if (
+                not legacy_manifest.is_file()
+                or legacy_directory.resolve() == target
+            ):
+                continue
+            legacy = YouTubeAccountStore(legacy_directory)
+            if not legacy._manifest["accounts"]:
+                continue
+            copied_tokens = []
+            original_manifest = self._manifest
+            try:
+                for account in legacy.accounts():
+                    source_token = legacy.token_path(account.account_id)
+                    if source_token.is_symlink():
+                        raise RuntimeError(
+                            "Legacy YouTube token files cannot be symbolic links."
+                        )
+                    if source_token.is_file():
+                        destination_token = (
+                            self.directory / f"{account.account_id}.token"
+                        )
+                        self._atomic_write(
+                            destination_token, source_token.read_bytes()
+                        )
+                        copied_tokens.append(destination_token)
+                self._manifest = legacy._manifest
+                self._write_manifest()
+            except (OSError, RuntimeError, ValueError):
+                self._manifest = original_manifest
+                for token_path in copied_tokens:
+                    token_path.unlink(missing_ok=True)
+                raise
+            return len(self._manifest["accounts"])
+        return 0
 
     def token_path(self, account_id: str) -> Path:
         self._find(account_id)
@@ -162,7 +241,18 @@ class YouTubeAccountStore:
             ):
                 raise RuntimeError("YouTube account profile file has an invalid entry.")
             seen_ids.add(account_id)
-            accounts.append({"account_id": account_id, "label": label.strip()})
+            reauth_required = item.get("reauth_required", False)
+            if not isinstance(reauth_required, bool):
+                raise RuntimeError(
+                    "YouTube account profile file has an invalid entry."
+                )
+            accounts.append(
+                {
+                    "account_id": account_id,
+                    "label": label.strip(),
+                    "reauth_required": reauth_required,
+                }
+            )
         active = manifest.get("active_account_id")
         if active is not None and active not in seen_ids:
             active = None
@@ -193,7 +283,7 @@ class YouTubeAccountStore:
         finally:
             temporary_path.unlink(missing_ok=True)
 
-    def _find(self, account_id: str) -> dict[str, str]:
+    def _find(self, account_id: str) -> dict[str, Any]:
         if not isinstance(account_id, str) or not _ACCOUNT_ID_PATTERN.fullmatch(
             account_id
         ):

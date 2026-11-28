@@ -3,11 +3,13 @@
 import hashlib
 import json
 from pathlib import Path
+from concurrent.futures import CancelledError
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
 
-from app.repurpose.models import TranscriptSegment
+from app.repurpose.models import TranscriptSegment, TranscriptWord
 from app.repurpose.moments import OllamaMomentRanker
 from app.repurpose.service import LocalClipAnalyzer
 from app.repurpose.source import LocalVideoCatalog
@@ -70,11 +72,24 @@ def test_catalog_requires_existing_folder_and_rejects_unsupported_file(tmp_path)
         catalog.inspect(unsupported)
 
 
+def test_catalog_stops_inspecting_when_cancellation_is_requested(tmp_path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    ffmpeg = FakeFFmpeg()
+    cancel_event = Event()
+    cancel_event.set()
+
+    with pytest.raises(CancelledError):
+        LocalVideoCatalog(ffmpeg).inspect(source, cancel_event=cancel_event)
+
+    assert ffmpeg.probed == []
+
+
 def test_ranker_returns_no_suggestions_when_video_is_shorter_than_minimum():
     transcript = (TranscriptSegment(0, 5, "A short source."),)
 
     class FakeJSONGenerator:
-        def generate_json(self, _system_prompt, _user_prompt):
+        def generate_json(self, _system_prompt, _user_prompt, **_kwargs):
             raise AssertionError("The model should not be called for an empty window set.")
 
     ranked = OllamaMomentRanker(FakeJSONGenerator()).rank(
@@ -95,7 +110,7 @@ def test_ranker_bounds_local_model_prompt_for_long_transcripts():
     payload_sizes = []
 
     class FakeJSONGenerator:
-        def generate_json(self, _system_prompt, user_prompt):
+        def generate_json(self, _system_prompt, user_prompt, **_kwargs):
             payload = json.loads(user_prompt)
             payload_sizes.append(len(payload["candidates"]))
             return {
@@ -119,7 +134,7 @@ def test_ranker_rejects_transcript_segments_outside_source_duration():
     transcript = (TranscriptSegment(0, 20, "Exceeds source duration."),)
 
     class FakeJSONGenerator:
-        def generate_json(self, _system_prompt, _user_prompt):
+        def generate_json(self, _system_prompt, _user_prompt, **_kwargs):
             raise AssertionError("Invalid transcript must be rejected before inference.")
 
     with pytest.raises(ValueError, match="exceeds source duration"):
@@ -140,8 +155,12 @@ def test_ranker_uses_local_model_scores_for_generated_ranges():
     prompts = []
 
     class FakeJSONGenerator:
-        def generate_json(self, system_prompt, user_prompt):
-            prompts.append((system_prompt, json.loads(user_prompt)))
+        def generate_json(
+            self, system_prompt, user_prompt, *, response_schema=None
+        ):
+            prompts.append(
+                (system_prompt, json.loads(user_prompt), response_schema)
+            )
             return {
                 "candidates": [
                     {"id": 1, "score": 0.9, "rationale": "A complete idea."},
@@ -161,6 +180,11 @@ def test_ranker_uses_local_model_scores_for_generated_ranges():
     assert ranked[0].score == 0.9
     assert ranked[0].start_seconds < ranked[0].end_seconds <= 60
     assert ranked[1].score == 0.5
+    assert prompts[0][2]["properties"]["candidates"]["items"]["required"] == [
+        "id",
+        "score",
+        "rationale",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -179,7 +203,7 @@ def test_ranker_rejects_malformed_local_model_output(response):
     )
 
     class FakeJSONGenerator:
-        def generate_json(self, _system_prompt, _user_prompt):
+        def generate_json(self, _system_prompt, _user_prompt, **_kwargs):
             return response
 
     with pytest.raises(RuntimeError):
@@ -193,6 +217,7 @@ def test_analyzer_connects_source_transcription_and_ranking(tmp_path):
     path.write_bytes(b"source")
     transcript = (TranscriptSegment(0, 10, "A complete sentence."),)
     calls = []
+    progress = []
 
     class FakeTranscriber:
         def transcribe(self, video_path, language=None):
@@ -210,7 +235,12 @@ def test_analyzer_connects_source_transcription_and_ranking(tmp_path):
         LocalVideoCatalog(FakeFFmpeg()), FakeTranscriber(), FakeRanker()
     )
     result = analyzer.analyze(
-        path, min_duration=10, max_duration=30, max_candidates=3, language="en"
+        path,
+        min_duration=10,
+        max_duration=30,
+        max_candidates=3,
+        language="en",
+        progress_callback=progress.append,
     )
 
     assert result.source.path == path.resolve()
@@ -220,6 +250,47 @@ def test_analyzer_connects_source_transcription_and_ranking(tmp_path):
         ("transcribe", path.resolve(), "en"),
         ("rank", transcript, 120, 10, 30, 3),
     ]
+    assert progress == [
+        "Inspecting source video...",
+        "Transcribing with the local speech model...",
+        "Ranking moments with the local Ollama model...",
+    ]
+
+
+def test_analyzer_reports_weighted_fractional_progress(tmp_path):
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"source")
+    fractions = []
+
+    class FakeTranscriber:
+        def transcribe(
+            self,
+            _video_path,
+            language=None,
+            cancel_event=None,
+            progress_callback=None,
+            progress_duration_seconds=None,
+        ):
+            assert progress_duration_seconds == 120
+            progress_callback(0.5)
+            return ()
+
+    class FakeRanker:
+        def rank(self, *_args, **_kwargs):
+            return ()
+
+    analyzer = LocalClipAnalyzer(
+        LocalVideoCatalog(FakeFFmpeg()),
+        FakeTranscriber(),
+        FakeRanker(),
+    )
+
+    analyzer.analyze(
+        source_path,
+        progress_fraction_callback=fractions.append,
+    )
+
+    assert fractions == [0.05, 0.425, 0.85, 1.0]
 
 
 def test_faster_whisper_requires_an_installed_local_model(tmp_path):
@@ -227,7 +298,7 @@ def test_faster_whisper_requires_an_installed_local_model(tmp_path):
         FasterWhisperTranscriber(tmp_path / "missing-model")
 
 
-def test_faster_whisper_loads_model_in_local_files_only_mode(
+def test_auto_transcriber_uses_cuda_when_compute_types_are_available(
     tmp_path, monkeypatch
 ):
     model_dir = tmp_path / "model"
@@ -238,14 +309,132 @@ def test_faster_whisper_loads_model_in_local_files_only_mode(
 
     class FakeWhisperModel:
         def __init__(self, *args, **kwargs):
+            constructor_args.append(kwargs)
+
+        def transcribe(self, _path, **_kwargs):
+            return iter(()), SimpleNamespace(language="en")
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "ctranslate2",
+        SimpleNamespace(
+            get_cuda_device_count=lambda: 1,
+            get_supported_compute_types=lambda _device: {"float16", "int8"},
+        ),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=FakeWhisperModel),
+    )
+    status = []
+    transcriber = FasterWhisperTranscriber(
+        model_dir, device="auto", status_callback=status.append
+    )
+
+    transcriber.transcribe(source)
+
+    assert constructor_args[0]["device"] == "cuda"
+    assert constructor_args[0]["compute_type"] == "float16"
+    assert any("Transcription device: CUDA" in message for message in status)
+
+
+def test_auto_transcriber_falls_back_to_cpu_if_cuda_model_load_fails(
+    tmp_path, monkeypatch
+):
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    attempted_devices = []
+
+    class FakeWhisperModel:
+        def __init__(self, *_args, **kwargs):
+            attempted_devices.append(kwargs["device"])
+            if kwargs["device"] == "cuda":
+                raise RuntimeError("CUDA runtime is unavailable")
+
+        def transcribe(self, _path, **_kwargs):
+            return iter(()), SimpleNamespace(language="en")
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "ctranslate2",
+        SimpleNamespace(
+            get_cuda_device_count=lambda: 1,
+            get_supported_compute_types=lambda _device: {"float16"},
+        ),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=FakeWhisperModel),
+    )
+    status = []
+    transcriber = FasterWhisperTranscriber(
+        model_dir, device="auto", status_callback=status.append
+    )
+
+    transcriber.transcribe(source)
+
+    assert attempted_devices == ["cuda", "cpu"]
+    assert any("CPU fallback" in message for message in status)
+
+
+def test_explicit_cuda_transcriber_reports_missing_gpu(tmp_path, monkeypatch):
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "ctranslate2",
+        SimpleNamespace(
+            get_cuda_device_count=lambda: 0,
+            get_supported_compute_types=lambda _device: set(),
+        ),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=lambda *_args, **_kwargs: None),
+    )
+
+    with pytest.raises(RuntimeError, match="select Auto/CPU"):
+        FasterWhisperTranscriber(model_dir, device="cuda").transcribe(source)
+
+
+def test_faster_whisper_loads_model_in_local_files_only_mode(
+    tmp_path, monkeypatch
+):
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    constructor_args = []
+    transcribe_options = []
+
+    class FakeWhisperModel:
+        def __init__(self, *args, **kwargs):
             constructor_args.append((args, kwargs))
 
         def transcribe(self, path, **kwargs):
+            transcribe_options.append(kwargs)
             return (
                 iter(
                     [
                         SimpleNamespace(
-                            start=0.1, end=2.2, text=" Spoken words. "
+                            start=0.1,
+                            end=2.2,
+                            text=" Spoken words. ",
+                            words=[
+                                SimpleNamespace(
+                                    start=0.2, end=0.7, word=" Spoken"
+                                ),
+                                SimpleNamespace(
+                                    start=0.8, end=1.5, word=" words."
+                                ),
+                            ],
                         )
                     ]
                 ),
@@ -259,7 +448,57 @@ def test_faster_whisper_loads_model_in_local_files_only_mode(
     )
     transcriber = FasterWhisperTranscriber(model_dir)
 
-    result = transcriber.transcribe(source, language="en")
+    fractions = []
+    result = transcriber.transcribe(
+        source,
+        language="en",
+        progress_callback=fractions.append,
+        progress_duration_seconds=120,
+    )
 
     assert constructor_args[0][1]["local_files_only"] is True
-    assert result == (TranscriptSegment(0.1, 2.2, "Spoken words."),)
+    assert transcribe_options[0]["word_timestamps"] is True
+    assert result == (
+        TranscriptSegment(
+            0.1,
+            2.2,
+            "Spoken words.",
+            (
+                TranscriptWord(0.2, 0.7, "Spoken"),
+                TranscriptWord(0.8, 1.5, "words."),
+            ),
+        ),
+    )
+    assert fractions == pytest.approx([2.2 / 120, 1.0])
+
+
+def test_faster_whisper_stops_between_transcript_segments(
+    tmp_path, monkeypatch
+):
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    cancel_event = Event()
+
+    def segments():
+        yield SimpleNamespace(start=0, end=1, text="First segment.")
+        cancel_event.set()
+        yield SimpleNamespace(start=1, end=2, text="Second segment.")
+
+    class FakeWhisperModel:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def transcribe(self, _path, **_kwargs):
+            return iter(segments()), SimpleNamespace(language="en")
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=FakeWhisperModel),
+    )
+    transcriber = FasterWhisperTranscriber(model_dir)
+
+    with pytest.raises(CancelledError):
+        transcriber.transcribe(source, cancel_event=cancel_event)
