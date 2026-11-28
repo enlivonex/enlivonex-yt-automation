@@ -7,6 +7,8 @@ import tempfile
 from threading import Event
 from typing import Callable
 
+from app.system.hardware import has_nvidia_gpu
+
 from ..captions.timed import (
     CaptionSegment,
     CaptionStyle,
@@ -63,6 +65,13 @@ class LocalClipRenderer:
             raise FileExistsError(f"Output video already exists: {destination}")
         if not self.ffmpeg.is_available():
             raise RuntimeError("FFmpeg/FFprobe is required to render clips.")
+        nvidia_gpu_available = (
+            plan.settings.hardware_acceleration != "cpu" and has_nvidia_gpu()
+        )
+        if plan.settings.hardware_acceleration == "cuda" and not nvidia_gpu_available:
+            raise RuntimeError(
+                "No NVIDIA GPU was detected. Select Auto or CPU-only processing."
+            )
 
         destination.parent.mkdir(parents=True, exist_ok=True)
         working_directory = Path(
@@ -114,8 +123,10 @@ class LocalClipRenderer:
                     has_audio,
                     plan,
                     index,
+                    nvidia_gpu_available,
                     cancel_event,
                     segment_progress,
+                    stage_callback,
                 )
                 segment_paths.append(segment_path)
                 offset_seconds += duration
@@ -178,8 +189,10 @@ class LocalClipRenderer:
         has_audio: bool,
         plan: ClipEditPlan,
         index: int,
+        nvidia_gpu_available: bool,
         cancel_event: Event | None,
         progress_callback: Callable[[float], None] | None,
+        stage_callback: Callable[[str], None] | None,
     ) -> None:
         settings = plan.settings
         filters = [
@@ -209,7 +222,7 @@ class LocalClipRenderer:
             filters.append(self._ass_filter(caption_path))
 
         duration = clip_range.end_seconds - clip_range.start_seconds
-        args = [
+        command_prefix = [
             "-hide_banner",
             "-loglevel",
             "error",
@@ -224,40 +237,88 @@ class LocalClipRenderer:
             ",".join(filters),
             "-map",
             "0:v:0",
-            "-c:v",
-            "libx264",
-            "-preset",
-            settings.quality_preset,
-            "-crf",
-            "23",
+        ]
+        command_suffix = [
             "-pix_fmt",
             "yuv420p",
             "-r",
             str(settings.fps),
         ]
         if has_audio:
-            args.extend(
+            command_suffix.extend(
                 ["-map", "0:a:0", "-c:a", "aac", "-b:a", "192k"]
             )
         else:
-            args.append("-an")
-        args.extend(["-movflags", "+faststart"])
-        if cancel_event is not None or progress_callback is not None:
-            args.extend(["-progress", "pipe:1", "-nostats", str(segment_path)])
-            return_code, _, stderr = self.ffmpeg.execute_cancellable(
-                args,
-                timeout=RENDER_TIMEOUT_SECONDS,
-                expected_duration_seconds=duration,
-                cancel_event=cancel_event,
-                progress_callback=progress_callback,
+            command_suffix.append("-an")
+        command_suffix.extend(["-movflags", "+faststart"])
+
+        def command_args(use_nvenc: bool) -> list[str]:
+            encoder_options = (
+                [
+                    "-c:v",
+                    "h264_nvenc",
+                    "-preset",
+                    "p4",
+                    "-cq",
+                    "23",
+                    "-b:v",
+                    "0",
+                ]
+                if use_nvenc
+                else [
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    settings.quality_preset,
+                    "-crf",
+                    "23",
+                ]
             )
-        else:
-            args.append(str(segment_path))
-            return_code, _, stderr = self.ffmpeg.execute(
-                args, timeout=RENDER_TIMEOUT_SECONDS
-            )
+            args = command_prefix + encoder_options + command_suffix
+            if cancel_event is not None or progress_callback is not None:
+                args.extend(["-progress", "pipe:1", "-nostats", str(segment_path)])
+            else:
+                args.append(str(segment_path))
+            return args
+
+        def execute(args: list[str]):
+            if cancel_event is not None or progress_callback is not None:
+                return self.ffmpeg.execute_cancellable(
+                    args,
+                    timeout=RENDER_TIMEOUT_SECONDS,
+                    expected_duration_seconds=duration,
+                    cancel_event=cancel_event,
+                    progress_callback=progress_callback,
+                )
+            return self.ffmpeg.execute(args, timeout=RENDER_TIMEOUT_SECONDS)
+
+        use_nvenc = (
+            nvidia_gpu_available
+            and settings.hardware_acceleration in {"auto", "cuda"}
+        )
+        args = command_args(use_nvenc)
+        return_code, _, stderr = execute(args)
+        if return_code != 0 and settings.hardware_acceleration == "auto":
+            try:
+                segment_path.unlink(missing_ok=True)
+            except OSError as error:
+                raise RuntimeError(
+                    f"NVIDIA encoding failed and its partial output could not "
+                    f"be removed: {error}"
+                ) from error
+            if stage_callback is not None:
+                stage_callback(
+                    "NVIDIA encoding is unavailable; retrying with CPU encoding."
+                )
+            args = command_args(use_nvenc=False)
+            return_code, _, stderr = execute(args)
         if return_code != 0:
             detail = stderr.strip()[-1200:] or "FFmpeg returned a non-zero exit code."
+            if settings.hardware_acceleration == "cuda":
+                detail = (
+                    "NVIDIA NVENC failed. Select Auto to allow CPU fallback. "
+                    + detail
+                )
             raise RuntimeError(f"Could not render clip {index + 1}: {detail}")
 
     @staticmethod

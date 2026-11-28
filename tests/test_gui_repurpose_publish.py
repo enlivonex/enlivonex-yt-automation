@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -33,7 +34,7 @@ def test_repurpose_draft_enters_upload_review_as_private(
     page = window.repurpose_page
     page._operation_name = "render"
     page._operation_succeeded(
-        RenderedClip(draft.resolve(), 30, 720, 1280, True, 2)
+        (RenderedClip(draft.resolve(), 30, 720, 1280, True, 1),)
     )
 
     page.prepare_upload_button.click()
@@ -50,5 +51,35 @@ def test_repurpose_draft_enters_upload_review_as_private(
     assert window.upload_visibility.currentText() == "private"
     assert window.upload_description.toPlainText() == ""
     assert not window.active_task
+    window.close()
+    qapplication.processEvents()
+
+
+def test_system_scan_enables_gpu_option_only_when_nvidia_is_detected(
+    tmp_path, monkeypatch, qapplication
+):
+    monkeypatch.chdir(tmp_path)
+    window = PySideDashboard()
+    assert window.repurpose_page.processing_device.findData("cuda") == -1
+
+    scan = SimpleNamespace(
+        hardware=SimpleNamespace(
+            has_nvidia=True,
+            gpu_name="NVIDIA Test GPU",
+        ),
+        recommendation=SimpleNamespace(
+            compatible_story_models=["qwen2.5:3b"],
+            story_model="qwen2.5:3b",
+            embedding_model="nomic-embed-text",
+        ),
+        installed_ollama_models=[],
+    )
+    window.events.put(("pc_scan_done", (scan, "NVIDIA Test GPU detected.")))
+    window._process_events()
+
+    assert window.repurpose_page.processing_device.findData("cuda") >= 0
+    assert "NVIDIA Test GPU detected" in window.repurpose_page.acceleration_help.text()
+    assert "Moment finding stays CPU-only" in window.repurpose_page.acceleration_help.text()
+
     window.close()
     qapplication.processEvents()

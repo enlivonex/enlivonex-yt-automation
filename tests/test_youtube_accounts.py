@@ -8,6 +8,7 @@ import pytest
 
 from app.youtube.accounts import (
     YouTubeAccountStore,
+    default_youtube_accounts_directory,
     read_protected_token,
     write_protected_token,
 )
@@ -31,6 +32,55 @@ def test_account_profiles_add_select_and_remove(tmp_path):
     assert store.accounts() == [second]
     assert store.active_account_id == second.account_id
     assert not token_path.exists()
+
+
+def test_reauthorization_status_persists_in_manifest(tmp_path):
+    directory = tmp_path / "accounts"
+    store = YouTubeAccountStore(directory)
+    account = store.add_account("Creator channel")
+
+    updated = store.set_reauth_required(account.account_id, True)
+    reopened = YouTubeAccountStore(directory)
+
+    assert updated.reauth_required
+    assert reopened.accounts() == [updated]
+    assert reopened.set_reauth_required(account.account_id, False).reauth_required is False
+
+
+def test_legacy_account_profiles_migrate_to_stable_store(tmp_path):
+    legacy = YouTubeAccountStore(tmp_path / "old-working-directory" / "data" / "youtube_accounts")
+    account = legacy.add_account("Creator channel")
+    write_protected_token(
+        legacy.token_path(account.account_id),
+        json.dumps({"refresh_token": "saved-refresh-token"}),
+    )
+    stable = YouTubeAccountStore(tmp_path / "user-data" / "youtube_accounts")
+
+    migrated = stable.migrate_legacy_profiles([legacy.directory])
+
+    assert migrated == 1
+    assert stable.accounts() == [account]
+    assert read_protected_token(stable.token_path(account.account_id))[
+        "refresh_token"
+    ] == "saved-refresh-token"
+    assert legacy.directory.joinpath("accounts.json").is_file()
+
+
+def test_default_youtube_accounts_directory_uses_local_app_data(
+    monkeypatch, tmp_path
+):
+    if os.name == "nt":
+        root = tmp_path / "LocalAppData"
+        monkeypatch.setenv("LOCALAPPDATA", str(root))
+    else:
+        root = tmp_path / "XDG_DATA_HOME"
+        monkeypatch.setenv("XDG_DATA_HOME", str(root))
+
+    directory = default_youtube_accounts_directory()
+
+    assert directory == (
+        root / "Enlivonex" / "YouTube Automation" / "youtube_accounts"
+    )
 
 
 def test_account_profiles_reject_duplicate_names_and_invalid_ids(tmp_path):
@@ -142,9 +192,100 @@ def test_new_oauth_flow_prompts_user_to_choose_google_account(
 
     flow.run_local_server.assert_called_once_with(
         port=0,
-        prompt="select_account",
+        access_type="offline",
+        prompt="consent select_account",
         timeout_seconds=300,
     )
+
+
+def test_forced_reauthorization_skips_saved_token_and_saves_new_grant(
+    tmp_path, monkeypatch
+):
+    credentials_path = tmp_path / "oauth-client.json"
+    credentials_path.write_text("{}", encoding="utf-8")
+    token_path = tmp_path / "accounts" / "account.token"
+    write_protected_token(token_path, json.dumps({"refresh_token": "old"}))
+    credentials = Mock(valid=True)
+    credentials.to_json.return_value = json.dumps({"refresh_token": "new"})
+    flow = Mock()
+    flow.run_local_server.return_value = credentials
+    monkeypatch.setattr(
+        "google.oauth2.credentials.Credentials.from_authorized_user_info",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Forced reauthorization must not load the saved grant"
+        ),
+    )
+    monkeypatch.setattr(
+        "google_auth_oauthlib.flow.InstalledAppFlow.from_client_secrets_file",
+        lambda *_args, **_kwargs: flow,
+    )
+    monkeypatch.setattr(
+        "google_auth_httplib2.AuthorizedHttp",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        "googleapiclient.discovery.build",
+        lambda *_args, **_kwargs: object(),
+    )
+    uploader = YouTubeUploader(
+        Database(tmp_path / "media.db"),
+        credentials_path=credentials_path,
+        token_path=token_path,
+    )
+    monkeypatch.setattr(uploader, "_create_media_http", lambda _module: object())
+
+    uploader.authenticate(force_reauthorization=True)
+
+    flow.run_local_server.assert_called_once()
+    assert read_protected_token(token_path)["refresh_token"] == "new"
+
+
+def test_invalid_oauth_client_error_explains_ai_studio_key_mismatch(
+    tmp_path, monkeypatch
+):
+    from oauthlib.oauth2.rfc6749.errors import InvalidClientError
+
+    credentials_path = tmp_path / "youtube-client.json"
+    credentials_path.write_text("{}", encoding="utf-8")
+    flow = Mock()
+    flow.run_local_server.side_effect = InvalidClientError(
+        description="The provided client secret is invalid."
+    )
+    monkeypatch.setattr(
+        "google_auth_oauthlib.flow.InstalledAppFlow.from_client_secrets_file",
+        lambda *_args, **_kwargs: flow,
+    )
+    uploader = YouTubeUploader(
+        Database(tmp_path / "media.db"),
+        credentials_path=credentials_path,
+        token_path=tmp_path / "account.token",
+    )
+
+    with pytest.raises(RuntimeError, match="Google AI Studio/Gemini"):
+        uploader.authenticate()
+
+
+def test_expired_youtube_grant_requires_reauthorization(tmp_path, monkeypatch):
+    from google.auth.exceptions import RefreshError
+
+    credentials_path = tmp_path / "oauth-client.json"
+    credentials_path.write_text("{}", encoding="utf-8")
+    token_path = tmp_path / "accounts" / "account.token"
+    write_protected_token(token_path, json.dumps({"refresh_token": "expired"}))
+    credentials = Mock(valid=False, expired=True, refresh_token="expired")
+    credentials.refresh.side_effect = RefreshError("invalid_grant")
+    monkeypatch.setattr(
+        "google.oauth2.credentials.Credentials.from_authorized_user_info",
+        lambda *_args, **_kwargs: credentials,
+    )
+    uploader = YouTubeUploader(
+        Database(tmp_path / "media.db"),
+        credentials_path=credentials_path,
+        token_path=token_path,
+    )
+
+    with pytest.raises(RuntimeError, match="Reconnect this account"):
+        uploader.authenticate(allow_new_authorization=False)
 
 
 def test_oauth_connection_retries_timeout_then_returns_result(monkeypatch):

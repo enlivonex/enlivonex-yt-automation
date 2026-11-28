@@ -55,6 +55,8 @@ def test_analyze_command_saves_versioned_local_analysis(tmp_path, monkeypatch, c
     analysis = create_analysis(video)
     output = tmp_path / "analysis.json"
     captured = {}
+    client_options = []
+    transcriber_options = []
 
     class FakeAnalyzer:
         def analyze(self, video_path, **options):
@@ -63,9 +65,18 @@ def test_analyze_command_saves_versioned_local_analysis(tmp_path, monkeypatch, c
             return analysis
 
     monkeypatch.setattr(
-        cli, "FasterWhisperTranscriber", lambda model_path: object()
+        cli,
+        "FasterWhisperTranscriber",
+        lambda model_path, **kwargs: transcriber_options.append(
+            (model_path, kwargs)
+        )
+        or object(),
     )
-    monkeypatch.setattr(cli, "OllamaClient", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        cli,
+        "OllamaClient",
+        lambda **kwargs: client_options.append(kwargs) or object(),
+    )
     monkeypatch.setattr(cli, "OllamaMomentRanker", lambda _client: object())
     monkeypatch.setattr(
         cli, "LocalClipAnalyzer", lambda **_kwargs: FakeAnalyzer()
@@ -98,6 +109,16 @@ def test_analyze_command_saves_versioned_local_analysis(tmp_path, monkeypatch, c
     assert captured["options"]["max_duration"] == 20
     assert captured["options"]["language"] == "en"
     assert "1. 0.00-10.00s" in capsys.readouterr().out
+    assert transcriber_options == [
+        (tmp_path / "model", {"device": "cpu"})
+    ]
+    assert client_options == [
+        {
+            "base_url": "http://127.0.0.1:11434",
+            "model": "qwen2.5:3b",
+            "cpu_only": True,
+        }
+    ]
 
 
 def test_render_command_passes_selected_moments_as_one_compilation(
@@ -194,3 +215,103 @@ def test_render_command_rejects_candidate_index_out_of_range(
         )
 
     assert error.value.code == 2
+
+
+def test_clip_command_transcribes_and_renders_exact_short_range(
+    tmp_path, monkeypatch, capsys
+):
+    video = tmp_path / "source.mp4"
+    create_analysis(video)
+    output = tmp_path / "manual.mp4"
+    captured = {}
+
+    transcriber = object()
+
+    class FakeManualClipper:
+        def render(
+            self,
+            video_path,
+            start_seconds,
+            end_seconds,
+            output_path,
+            settings,
+            **options,
+        ):
+            captured.update(options)
+            captured.update(
+                video_path=video_path,
+                start_seconds=start_seconds,
+                end_seconds=end_seconds,
+                output_path=output_path,
+                settings=settings,
+            )
+            return RenderedClip(output, 5.5, 1080, 1920, True, 1)
+
+    monkeypatch.setattr(cli, "FasterWhisperTranscriber", lambda _path: transcriber)
+    monkeypatch.setattr(cli, "LocalManualClipper", FakeManualClipper)
+
+    cli.main(
+        [
+            "clip",
+            str(video),
+            "--start",
+            "00:10.5",
+            "--end",
+            "00:16",
+            "--whisper-model",
+            str(tmp_path / "model"),
+            "--language",
+            "en",
+            "--output",
+            str(output),
+            "--caption-style",
+            "gaming",
+        ]
+    )
+
+    assert captured["video_path"] == video
+    assert captured["start_seconds"] == 10.5
+    assert captured["end_seconds"] == 16.0
+    assert captured["transcriber"] is transcriber
+    assert captured["language"] == "en"
+    assert captured["output_path"] == output
+    assert captured["settings"].burn_captions is True
+    assert captured["settings"].caption_style == "gaming"
+    assert "Rendered video:" in capsys.readouterr().out
+
+
+def test_clip_command_rejects_ranges_over_90_seconds_before_processing(capsys):
+    with pytest.raises(SystemExit) as error:
+        cli.main(
+            [
+                "clip",
+                "source.mp4",
+                "--start",
+                "0",
+                "--end",
+                "90.01",
+                "--output",
+                "manual.mp4",
+            ]
+        )
+
+    assert error.value.code == 2
+    assert "must not exceed 90 seconds" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("12.5", 12.5),
+        ("01:30", 90.0),
+        ("00:01:30.5", 90.5),
+    ],
+)
+def test_parse_time_accepts_seconds_and_timecodes(value, expected):
+    assert cli._parse_time(value) == expected
+
+
+@pytest.mark.parametrize("value", ["-1", "00:60", "1:2:3:4", "nan"])
+def test_parse_time_rejects_invalid_values(value):
+    with pytest.raises(cli.argparse.ArgumentTypeError):
+        cli._parse_time(value)

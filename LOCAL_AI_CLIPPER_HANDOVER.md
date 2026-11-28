@@ -12,21 +12,25 @@ generator or legacy Drive captioning pipeline.
 
 ## Intended user workflow
 
-1. Choose one supported video from the computer.
-2. Confirm editing rights, choose a local speech model, and optionally select
-   the spoken language. Automatic language detection is the default.
-3. Set the suggested clip length and analyze locally.
-4. Review the suggestions, select moments, and adjust their start/end times.
-5. Choose the output format and captions. Optional styling controls include
-   frame fit, caption style, brightness, contrast, saturation, sharpness, and
-   grain. Creator credit is entered manually.
-6. Choose an MP4 destination, render, and open the local draft for review.
+1. Choose one supported video from the computer and confirm editing rights.
+2. Select either AI-suggested moments or an exact source time range. In AI mode,
+   choose up to four suggestions to review; manual clips can be shorter than the
+   suggestion minimum and are limited to 90 seconds.
+3. Choose the output format and captions. Manual clips transcribe only the
+   selected audio range for captions. Optional styling controls include frame
+   fit, caption style, brightness, contrast, saturation, sharpness, and grain.
+   Creator credit is entered manually.
+4. Choose an MP4 filename prefix, render, and open the local drafts for review.
+   The desktop UI saves each selected moment as a separate numbered MP4 and
+   displays percentage progress with an approximate remaining-time estimate.
    Upload remains a separate, explicitly confirmed YouTube workflow.
 
 ### Output behavior
 
-The first export compiles selected moments into one output video in the order
-chosen by the user. Separate output files per moment can be considered later.
+The desktop UI renders each selected moment to its own numbered MP4 file.
+Clipper settings, including the selected mode and output styling, are saved in
+the user's local `.env` preferences. The CLI `render` command continues to join
+selected moments into one MP4.
 
 ### Speech captions and grading
 
@@ -37,6 +41,9 @@ chosen by the user. Separate output files per moment can be considered later.
   model; analysis does not download one implicitly.
 - Timed transcript captions are enabled by default and burned into the rendered
   video. The user may turn them off for an individual render.
+- Exact-time clips do not need a full-video analysis or Ollama moment ranking.
+  Their captions are transcribed from the selected audio range and shifted to
+  the original source timestamps for rendering.
 - The desktop clipper defaults to a portrait composition with the source
   centered over a darkened, blurred fill background and to a bold yellow,
   black-outlined caption preset in the lower third. Cropped and padded layouts
@@ -115,8 +122,9 @@ local-model ranking request to bound prompt size. Ollama ranking uses a JSON
 response schema so required numeric scores and rationales are enforced before
 candidate parsing.
 
-The rendering interface compiles an ordered set of user-selected source ranges
-into one output file:
+The renderer accepts an ordered set of user-selected source ranges and compiles
+them into one output file. The desktop UI invokes it once per selected range to
+produce separate clips:
 
 ```python
 plan = ClipEditPlan(
@@ -149,6 +157,15 @@ temporary files. Analysis cancellation is cooperative between inspection,
 transcription segments, and model operations. An in-flight Ollama request must
 return before its cancellation request can be applied.
 
+Moment finding always runs both Faster-Whisper transcription and local Ollama
+ranking on the CPU. **Render acceleration** remains a separate setting for
+FFmpeg encoding; Auto uses NVENC when NVIDIA hardware is detected and reports
+then retries on CPU if encoding fails. NVIDIA-only mode reports unavailable
+CUDA/NVENC instead of silently switching. CUDA/cuDNN runtime compatibility and
+FFmpeg's `h264_nvenc` support are required for NVIDIA rendering. The Settings
+page's **Scan this PC** result enables the NVIDIA-only render choice only when
+an NVIDIA GPU is detected; rendering stays CPU-only otherwise.
+
 The terminal workflow is available through `python -m app.repurpose.cli`:
 
 ```powershell
@@ -159,14 +176,25 @@ python -m app.repurpose.cli render "C:\Videos\source.analysis.json" `
   --candidate 1 --candidate 3 `
   --sharpness 0.5 --contrast 1.1 --saturation 1.1 --grain 4 `
   --output "C:\Videos\source-clips.mp4"
+
+python -m app.repurpose.cli clip "C:\Videos\source.mp4" `
+  --start 00:01:20 --end 00:02:35 `
+  --whisper-model "C:\models\faster-whisper-small" `
+  --caption-style gaming `
+  --output "C:\Videos\manual-clip.mp4"
 ```
 
 Analysis uses Faster-Whisper and the configured local Ollama model; rendering
 uses local FFmpeg. The output command joins the selected suggestions into one
-MP4. Optional AI dependencies are installed with
-`python -m pip install -r requirements-ai.txt`. Users must obtain the local
-Whisper and Ollama model files before analysis; model acquisition is not done
-implicitly while processing a video.
+MP4. The `clip` command renders one exact source range without running AI moment
+ranking. It accepts seconds, `MM:SS`, or `HH:MM:SS` start/end values, has no
+minimum duration, and rejects clips longer than 90 seconds. Captions are
+transcribed from only the selected audio range; pass `--no-captions` to skip
+transcription. The existing `analyze --min-duration` option continues to set a
+minimum length for AI-suggested candidates only. Optional AI dependencies are
+installed with `python -m pip install -r requirements-ai.txt`. Users must obtain
+the local Whisper and Ollama model files before analysis; model acquisition is
+not done implicitly while processing a video.
 
 ## Cost and offline expectations
 
@@ -246,8 +274,9 @@ and workflow a change targets before editing documentation or shared code.
 The desktop page supports one local source video per job, local transcription
 and moment ranking, editable ranges, portrait/landscape/square rendering,
 timed captions, optional creator credit, and bounded image adjustments. It
-compiles selected moments into one MP4. Preserve this simple workflow and keep
-it separate from the topic-led video generator.
+exports up to four selected moments as separate MP4s, while the CLI retains its
+single-compilation behavior. Preserve this workflow and keep it separate from
+the topic-led video generator.
 
 Not included: automatic creator identification, multi-video batch jobs,
 face-tracking reframing, cloud processing, direct video-URL fetching, or a

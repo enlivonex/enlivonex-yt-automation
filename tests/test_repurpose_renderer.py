@@ -106,6 +106,7 @@ def test_edit_plan_rejects_empty_or_out_of_bounds_ranges(tmp_path):
         {"fit_mode": "stretch"},
         {"caption_style": "unknown"},
         {"quality_preset": "unknown"},
+        {"hardware_acceleration": "unknown"},
         {"sharpness": -0.1},
         {"sharpness": 1.6},
         {"brightness": -1.1},
@@ -239,6 +240,128 @@ def test_renderer_applies_requested_creative_color_filters(tmp_path):
     assert "luma_amount=0.8" in filter_graph
     assert "eq=brightness=0.2:contrast=1.1:saturation=1.2" in filter_graph
     assert "noise=alls=6:allf=t+u" in filter_graph
+
+
+def test_renderer_uses_nvenc_when_gpu_encoding_is_selected(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.repurpose.renderer.has_nvidia_gpu", lambda: True
+    )
+    source = create_source(tmp_path / "source.mp4")
+    ffmpeg = FakeFFmpeg(output_duration=10)
+    plan = ClipEditPlan(
+        source,
+        (ClipRange(0, 10),),
+        settings=ClipOutputSettings(
+            burn_captions=False,
+            hardware_acceleration="cuda",
+        ),
+    )
+
+    LocalClipRenderer(ffmpeg, FakeCatalog(source)).render(
+        plan, tmp_path / "gpu.mp4"
+    )
+
+    segment_command = ffmpeg.commands[0][0]
+    assert segment_command[segment_command.index("-c:v") + 1] == "h264_nvenc"
+    assert segment_command[segment_command.index("-preset") + 1] == "p4"
+
+
+def test_renderer_auto_falls_back_to_cpu_when_nvenc_fails(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.repurpose.renderer.has_nvidia_gpu", lambda: True
+    )
+    source = create_source(tmp_path / "source.mp4")
+
+    class NvencUnavailableFFmpeg(FakeFFmpeg):
+        def execute(self, args, timeout):
+            self.commands.append((args, timeout))
+            Path(args[-1]).write_bytes(b"partial")
+            if "h264_nvenc" in args:
+                return 1, "", "NVIDIA encoder unavailable"
+            return 0, "", ""
+
+    ffmpeg = NvencUnavailableFFmpeg(output_duration=10)
+    plan = ClipEditPlan(
+        source,
+        (ClipRange(0, 10),),
+        settings=ClipOutputSettings(
+            burn_captions=False,
+            hardware_acceleration="auto",
+        ),
+    )
+    stages = []
+
+    LocalClipRenderer(ffmpeg, FakeCatalog(source)).render(
+        plan,
+        tmp_path / "auto.mp4",
+        stage_callback=stages.append,
+    )
+
+    video_commands = [
+        command for command, _timeout in ffmpeg.commands
+        if "-c:v" in command
+    ]
+    assert [command[command.index("-c:v") + 1] for command in video_commands] == [
+        "h264_nvenc",
+        "libx264",
+    ]
+    assert any("retrying with CPU encoding" in stage for stage in stages)
+
+
+def test_renderer_auto_skips_nvenc_when_no_nvidia_gpu(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.repurpose.renderer.has_nvidia_gpu", lambda: False
+    )
+    source = create_source(tmp_path / "source.mp4")
+    ffmpeg = FakeFFmpeg(output_duration=10)
+    plan = ClipEditPlan(
+        source,
+        (ClipRange(0, 10),),
+        settings=ClipOutputSettings(
+            burn_captions=False,
+            hardware_acceleration="auto",
+        ),
+    )
+
+    LocalClipRenderer(ffmpeg, FakeCatalog(source)).render(
+        plan, tmp_path / "cpu-only.mp4"
+    )
+
+    assert "h264_nvenc" not in ffmpeg.commands[0][0]
+    assert ffmpeg.commands[0][0][
+        ffmpeg.commands[0][0].index("-c:v") + 1
+    ] == "libx264"
+
+
+def test_renderer_rejects_gpu_only_mode_without_nvidia_gpu(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.repurpose.renderer.has_nvidia_gpu", lambda: False
+    )
+    source = create_source(tmp_path / "source.mp4")
+    ffmpeg = FakeFFmpeg(output_duration=10)
+    plan = ClipEditPlan(
+        source,
+        (ClipRange(0, 10),),
+        settings=ClipOutputSettings(
+            burn_captions=False,
+            hardware_acceleration="cuda",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="No NVIDIA GPU was detected"):
+        LocalClipRenderer(ffmpeg, FakeCatalog(source)).render(
+            plan, tmp_path / "gpu-only.mp4"
+        )
+
+    assert ffmpeg.commands == []
 
 
 def test_renderer_adds_creator_credit_even_without_transcript_captions(tmp_path):

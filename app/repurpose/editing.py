@@ -42,6 +42,7 @@ class ClipOutputSettings:
     grain: int = 0
     creator_credit: str = ""
     caption_style: str = "standard"
+    hardware_acceleration: str = "cpu"
 
     def __post_init__(self) -> None:
         if self.width < 2 or self.height < 2 or self.width % 2 or self.height % 2:
@@ -85,6 +86,10 @@ class ClipOutputSettings:
             raise ValueError("Creator credit must be a single line of at most 100 characters.")
         if self.caption_style not in {"standard", "gaming"}:
             raise ValueError("Caption style must be 'standard' or 'gaming'.")
+        if self.hardware_acceleration not in {"auto", "cpu", "cuda"}:
+            raise ValueError(
+                "Hardware acceleration must be 'auto', 'cpu', or 'cuda'."
+            )
 
 
 @dataclass(frozen=True)

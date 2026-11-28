@@ -36,7 +36,24 @@ def test_ollama_client_posts_to_local_chat_api(monkeypatch):
     assert kwargs["json"]["model"] == "qwen2.5:3b"
     assert kwargs["json"]["stream"] is False
     assert kwargs["json"]["format"] == "json"
+    assert kwargs["json"]["options"] == {"temperature": 0.7}
     assert kwargs["timeout"] == (5, 300)
+
+
+def test_ollama_client_can_force_cpu_inference(monkeypatch):
+    response = Mock()
+    response.json.return_value = {"message": {"content": '{"title": "Local"}'}}
+    response.raise_for_status.return_value = None
+    post = Mock(return_value=response)
+    monkeypatch.setattr(OllamaClient, "_ensure_server_and_model", Mock())
+    monkeypatch.setattr("app.ai.ollama.requests.post", post)
+
+    OllamaClient(cpu_only=True).generate_json("system", "user")
+
+    assert post.call_args.kwargs["json"]["options"] == {
+        "temperature": 0.7,
+        "num_gpu": 0,
+    }
 
 
 def test_ollama_client_sends_response_schema(monkeypatch):

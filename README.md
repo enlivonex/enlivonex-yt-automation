@@ -2,12 +2,26 @@
 
 ## YouTube account profiles and local security
 
-The desktop app supports multiple named YouTube account profiles. Each profile uses its own upload-only OAuth token, and uploads require selecting a connected account and confirming the upload. On Windows, saved YouTube tokens are
-protected with DPAPI for the current Windows user. On other operating systems,token files use restrictive filesystem permissions where supported.
+The desktop app supports multiple named YouTube account profiles. Each profile
+uses its own upload-only OAuth token, and uploads require selecting an account
+and confirming the upload. Account profiles are stored in the current user's
+application-data directory, so they persist across launches from different
+working directories. Existing profiles are migrated from the previous local
+`data/youtube_accounts` location when possible. On Windows, saved tokens are
+protected with DPAPI for the current Windows user. On other operating systems,
+token files use restrictive filesystem permissions where supported.
+
+If a token expires or Google revokes access, the app marks the profile as
+needing reconnection. Select it in **YouTube Studio** and choose
+**Reconnect selected**; this starts a fresh browser sign-in for that profile.
+If adding a new account fails, the incomplete profile is removed.
 
 The OAuth client belongs to the application publisher, not each user. Once the publisher has configured and distributed the app's OAuth client, users select their own Google account in the sign-in browser and grant upload permission;
 they should not create a Google Cloud project or supply client credentials.
 The publisher must complete any Google consent-screen and API compliance steps required for public use. Until that is done, Google may restrict sign-in to accounts listed as test users.
+For local development, `YOUTUBE_CLIENT_SECRET_FILE` must point to the matching
+OAuth 2.0 Desktop app JSON from Google Cloud Console. A Google AI Studio/Gemini
+API key is not a YouTube OAuth client secret.
 
 This protection does not make the app or the computer impossible to compromise.
 Keep Windows updated, protect your account and device, do not share token files, and do not expose the local dashboard to untrusted networks. AI provider keys saved in `.env` are not encrypted by this feature.
@@ -18,14 +32,35 @@ A local-first automation pipeline for processing and uploading media content fro
 
 The desktop app includes a dedicated local clipper page for selecting a video,
 reviewing and trimming AI-suggested moments, then rendering a portrait, square,
-or landscape draft. Speech can be auto-detected or assigned a known language.
+or landscape draft. Select either AI-suggested moments or an exact source time
+range; clipper preferences are saved locally. Choose up to four suggestions,
+which are rendered as separate MP4 files with percentage progress and an
+approximate time remaining. Exact-time clips still save to the chosen filename.
+Speech can be auto-detected or assigned a known language.
 Captions, optional creator credits, brightness, contrast,
 saturation, sharpness, and grain are configurable before rendering. Processing
 uses the local Faster-Whisper, Ollama, and FFmpeg pipeline; source videos remain
 unchanged. The existing topic-led video generator and YouTube review safeguards
 remain separate and unchanged. See
 [LOCAL_AI_CLIPPER_HANDOVER.md](./LOCAL_AI_CLIPPER_HANDOVER.md) for the
-teammate-facing frontend and Windows build guide.
+teammate-facing frontend and Windows build guide. Both the desktop page and CLI
+support manually timed clips with local captions and a 90-second maximum.
+Moment finding always uses the CPU for both Faster-Whisper transcription and
+local Ollama ranking. **Render acceleration** is separate and controls FFmpeg
+encoding, with Auto/CPU/NVIDIA choices and CPU fallback in Auto. Run **Scan this
+PC** in AI settings to detect NVIDIA hardware and reveal the NVIDIA-only render
+choice; without a detected NVIDIA GPU, rendering uses CPU.
+
+## Live web research
+
+Topic-led script generation uses online search by default for fresh evidence.
+Search snippets are passed directly into the story prompt; if online search
+fails or returns no usable sources, generation stops with an error instead of
+silently relying on stale model knowledge. The **Enable online web research**
+setting can be disabled for intentional offline use; the app then warns that
+the selected model's built-in knowledge may be outdated. Existing `.env`
+settings are migrated once to enable live research by default; after that, an
+offline choice saved in the desktop app is preserved.
 
 ## Importing source footage
 

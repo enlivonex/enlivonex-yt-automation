@@ -45,7 +45,7 @@ class Settings:
             "OLLAMA_EMBEDDING_MODEL", "nomic-embed-text"
         )
         self.web_research_enabled: bool = os.getenv(
-            "WEB_RESEARCH_ENABLED", "false"
+            "WEB_RESEARCH_ENABLED", "true"
         ).strip().lower() in ("true", "1", "yes")
         self.ollama_base_url: str = os.getenv(
             "OLLAMA_BASE_URL", "http://127.0.0.1:11434"

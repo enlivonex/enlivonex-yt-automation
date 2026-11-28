@@ -257,9 +257,151 @@ def test_analyzer_connects_source_transcription_and_ranking(tmp_path):
     ]
 
 
+def test_analyzer_reports_weighted_fractional_progress(tmp_path):
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"source")
+    fractions = []
+
+    class FakeTranscriber:
+        def transcribe(
+            self,
+            _video_path,
+            language=None,
+            cancel_event=None,
+            progress_callback=None,
+            progress_duration_seconds=None,
+        ):
+            assert progress_duration_seconds == 120
+            progress_callback(0.5)
+            return ()
+
+    class FakeRanker:
+        def rank(self, *_args, **_kwargs):
+            return ()
+
+    analyzer = LocalClipAnalyzer(
+        LocalVideoCatalog(FakeFFmpeg()),
+        FakeTranscriber(),
+        FakeRanker(),
+    )
+
+    analyzer.analyze(
+        source_path,
+        progress_fraction_callback=fractions.append,
+    )
+
+    assert fractions == [0.05, 0.425, 0.85, 1.0]
+
+
 def test_faster_whisper_requires_an_installed_local_model(tmp_path):
     with pytest.raises(FileNotFoundError, match="Install the model"):
         FasterWhisperTranscriber(tmp_path / "missing-model")
+
+
+def test_auto_transcriber_uses_cuda_when_compute_types_are_available(
+    tmp_path, monkeypatch
+):
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    constructor_args = []
+
+    class FakeWhisperModel:
+        def __init__(self, *args, **kwargs):
+            constructor_args.append(kwargs)
+
+        def transcribe(self, _path, **_kwargs):
+            return iter(()), SimpleNamespace(language="en")
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "ctranslate2",
+        SimpleNamespace(
+            get_cuda_device_count=lambda: 1,
+            get_supported_compute_types=lambda _device: {"float16", "int8"},
+        ),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=FakeWhisperModel),
+    )
+    status = []
+    transcriber = FasterWhisperTranscriber(
+        model_dir, device="auto", status_callback=status.append
+    )
+
+    transcriber.transcribe(source)
+
+    assert constructor_args[0]["device"] == "cuda"
+    assert constructor_args[0]["compute_type"] == "float16"
+    assert any("Transcription device: CUDA" in message for message in status)
+
+
+def test_auto_transcriber_falls_back_to_cpu_if_cuda_model_load_fails(
+    tmp_path, monkeypatch
+):
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    attempted_devices = []
+
+    class FakeWhisperModel:
+        def __init__(self, *_args, **kwargs):
+            attempted_devices.append(kwargs["device"])
+            if kwargs["device"] == "cuda":
+                raise RuntimeError("CUDA runtime is unavailable")
+
+        def transcribe(self, _path, **_kwargs):
+            return iter(()), SimpleNamespace(language="en")
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "ctranslate2",
+        SimpleNamespace(
+            get_cuda_device_count=lambda: 1,
+            get_supported_compute_types=lambda _device: {"float16"},
+        ),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=FakeWhisperModel),
+    )
+    status = []
+    transcriber = FasterWhisperTranscriber(
+        model_dir, device="auto", status_callback=status.append
+    )
+
+    transcriber.transcribe(source)
+
+    assert attempted_devices == ["cuda", "cpu"]
+    assert any("CPU fallback" in message for message in status)
+
+
+def test_explicit_cuda_transcriber_reports_missing_gpu(tmp_path, monkeypatch):
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "ctranslate2",
+        SimpleNamespace(
+            get_cuda_device_count=lambda: 0,
+            get_supported_compute_types=lambda _device: set(),
+        ),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=lambda *_args, **_kwargs: None),
+    )
+
+    with pytest.raises(RuntimeError, match="select Auto/CPU"):
+        FasterWhisperTranscriber(model_dir, device="cuda").transcribe(source)
 
 
 def test_faster_whisper_loads_model_in_local_files_only_mode(
@@ -306,7 +448,13 @@ def test_faster_whisper_loads_model_in_local_files_only_mode(
     )
     transcriber = FasterWhisperTranscriber(model_dir)
 
-    result = transcriber.transcribe(source, language="en")
+    fractions = []
+    result = transcriber.transcribe(
+        source,
+        language="en",
+        progress_callback=fractions.append,
+        progress_duration_seconds=120,
+    )
 
     assert constructor_args[0][1]["local_files_only"] is True
     assert transcribe_options[0]["word_timestamps"] is True
@@ -321,6 +469,7 @@ def test_faster_whisper_loads_model_in_local_files_only_mode(
             ),
         ),
     )
+    assert fractions == pytest.approx([2.2 / 120, 1.0])
 
 
 def test_faster_whisper_stops_between_transcript_segments(
